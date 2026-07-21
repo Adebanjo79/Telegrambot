@@ -49,23 +49,60 @@ class Settings:
         else:
             load_dotenv()
 
-        private_key = _req("PRIVATE_KEY")
+        private_key = _req("PRIVATE_KEY").strip().strip('"').strip("'")
+        if private_key.lower() in {
+            "0xyourprivatekeyhere",
+            "yourprivatekeyhere",
+            "0x...",
+        }:
+            raise ValueError(
+                "PRIVATE_KEY is still the placeholder. Put your real wallet private key "
+                "(64 hex chars, optional 0x prefix). No spaces or quotes."
+            )
         if not private_key.startswith("0x"):
             private_key = "0x" + private_key
+        hex_body = private_key[2:]
+        if len(hex_body) != 64 or any(c not in "0123456789abcdefABCDEF" for c in hex_body):
+            raise ValueError(
+                "PRIVATE_KEY must be 64 hexadecimal characters after optional 0x "
+                "(example shape: 0x followed by 64 chars 0-9/a-f). "
+                "Remove spaces, quotes, and placeholder text."
+            )
 
-        account = Account.from_key(private_key)
+        try:
+            account = Account.from_key(private_key)
+        except Exception as exc:
+            raise ValueError(f"PRIVATE_KEY is invalid: {exc}") from exc
+
         raw_targets = _req("TARGET_WALLETS")
-        targets = tuple(
-            Web3.to_checksum_address(addr.strip())
-            for addr in raw_targets.split(",")
-            if addr.strip()
-        )
+        try:
+            targets = tuple(
+                Web3.to_checksum_address(addr.strip())
+                for addr in raw_targets.split(",")
+                if addr.strip()
+            )
+        except Exception as exc:
+            raise ValueError(
+                "TARGET_WALLETS must be one or more 0x addresses, comma-separated. "
+                f"Details: {exc}"
+            ) from exc
         if not targets:
             raise ValueError("TARGET_WALLETS must include at least one address")
+        if any(t.lower() == "0xtargetwalletaddresshere" for t in targets):
+            raise ValueError(
+                "TARGET_WALLETS is still the placeholder. Put the wallet address you want to copy."
+            )
+
+        try:
+            owner_id = int(_req("TELEGRAM_OWNER_ID"))
+        except ValueError as exc:
+            raise ValueError(
+                "TELEGRAM_OWNER_ID must be your numeric Telegram user id from @userinfobot"
+            ) from exc
 
         return cls(
             telegram_bot_token=_req("TELEGRAM_BOT_TOKEN"),
-            telegram_owner_id=int(_req("TELEGRAM_OWNER_ID")),
+            telegram_owner_id=owner_id,
             rpc_url=_opt("RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
             chain_id=int(_opt("CHAIN_ID", "4663")),
             explorer_url=_opt("EXPLORER_URL", "https://robinhoodchain.blockscout.com").rstrip(
