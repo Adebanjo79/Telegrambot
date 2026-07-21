@@ -12,6 +12,48 @@ Python bot that watches wallet(s) on **Robinhood Chain** (Ethereum L2, chain id 
 
 ## Quick start
 
+### Option A — clone from GitHub (recommended on Windows)
+
+In **PowerShell**:
+
+```powershell
+cd $HOME\Downloads
+git clone -b cursor/robinhood-nft-copy-bot-1e4f https://github.com/Adebanjo79/Telegrambot.git robinhood-nft-copy-bot
+cd robinhood-nft-copy-bot
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+notepad .env
+python main.py
+```
+
+If `Activate.ps1` is blocked, run once:
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
+
+### Option B — if you downloaded a Cursor zip
+
+1. In File Explorer, open `Downloads` and find the unzipped folder (it may be named like `telegram-bot-cursor-...` or end with `(1)`).
+2. Confirm you see `main.py` and `requirements.txt` inside it.
+3. In PowerShell, discover the real path instead of guessing:
+
+```powershell
+Get-ChildItem $HOME\Downloads -Directory | Where-Object { $_.Name -like "*robinhood*" -or $_.Name -like "*telegram-bot*" }
+```
+
+Then `cd` into the folder that contains `main.py`:
+
+```powershell
+cd "C:\Users\USER\Downloads\<exact-folder-name-here>"
+# if the zip nested another folder:
+cd .\telegram-bot-cursor-robinhood-nft-copy-bot-*
+dir   # you must see main.py here
+```
+
+Do **not** paste a path that wraps across two lines. If PowerShell says `Cannot find path`, the folder name is wrong — use `Get-ChildItem` above.
+
+### Linux / macOS
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
