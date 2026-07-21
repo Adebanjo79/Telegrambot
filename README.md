@@ -76,7 +76,7 @@ python main.py
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | From BotFather |
 | `TELEGRAM_OWNER_ID` | Only this Telegram user can control the bot |
-| `RPC_URL` | Default `https://rpc.mainnet.chain.robinhood.com` |
+| `RPC_URL` | Default public RPC (rate-limited). Prefer Alchemy/QuickNode for stability |
 | `CHAIN_ID` | `4663` (Robinhood Chain mainnet) |
 | `EXPLORER_URL` | Default `https://robinhoodchain.blockscout.com` |
 | `TARGET_WALLETS` | Comma-separated wallets to copy |
@@ -102,6 +102,13 @@ python main.py
 - Native gas token: ETH
 
 For production, prefer Alchemy / QuickNode RPC URLs from the [Robinhood Chain docs](https://docs.robinhood.com/chain/connecting/).
+
+If Telegram shows `Remote end closed connection` / watcher RPC blips, the public RPC is dropping you. Fix:
+
+1. Create a free Alchemy app on Robinhood Chain
+2. Set `RPC_URL=https://robinhood-mainnet.g.alchemy.com/v2/YOUR_KEY` in `.env`
+3. Optionally set `POLL_INTERVAL_SEC=1.5`
+4. Restart `python main.py`
 
 ## Recommended first run
 

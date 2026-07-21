@@ -8,6 +8,7 @@ from web3 import Web3
 
 from bot.config import Settings
 from bot.mint_copy import MintCopyService
+from bot.rpc import is_transient_rpc_error
 from bot.telegram_bot import TelegramTracker
 from bot.watcher import WalletWatcher
 
@@ -20,7 +21,7 @@ log = logging.getLogger("main")
 
 
 def build_web3(rpc_url: str) -> Web3:
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
+    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 45}))
     if not w3.is_connected():
         raise RuntimeError(f"Cannot connect to RPC: {rpc_url}")
     return w3
@@ -32,6 +33,7 @@ async def watch_loop(
     mint_copy: MintCopyService,
 ) -> None:
     settings = tracker.settings
+    last_rpc_alert = 0.0
     while True:
         try:
             if watcher.enabled:
@@ -67,6 +69,22 @@ async def watch_loop(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if is_transient_rpc_error(exc):
+                log.warning("Transient RPC error (will retry): %s", exc)
+                now = asyncio.get_running_loop().time()
+                # Avoid spamming Telegram on public RPC disconnects.
+                if now - last_rpc_alert > 120:
+                    last_rpc_alert = now
+                    try:
+                        await tracker.notify(
+                            "⚠️ RPC connection blip (retrying). "
+                            "Public RPC is rate-limited — prefer Alchemy/QuickNode in RPC_URL."
+                        )
+                    except Exception:
+                        pass
+                await asyncio.sleep(max(settings.poll_interval_sec, 2.0))
+                continue
+
             log.exception("Poll loop error")
             try:
                 await tracker.notify(f"⚠️ Watcher error: {exc}")

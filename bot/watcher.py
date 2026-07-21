@@ -8,6 +8,7 @@ from web3 import Web3
 
 from bot.config import Settings
 from bot.models import MintCandidate
+from bot.rpc import rpc_call
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class WalletWatcher:
         self.target_set = {addr.lower() for addr in settings.target_wallets}
 
     def bootstrap(self) -> int:
-        head = self.w3.eth.block_number
+        head = rpc_call(lambda: self.w3.eth.block_number)
         self.last_block = head
         return head
 
@@ -80,24 +81,30 @@ class WalletWatcher:
         if not self.enabled:
             return []
 
-        head = self.w3.eth.block_number
+        head = rpc_call(lambda: self.w3.eth.block_number)
         if head <= self.last_block:
             return []
 
         start = max(self.last_block + 1, head - self.settings.max_catchup_blocks + 1)
         found: list[MintCandidate] = []
+        last_ok = self.last_block
 
         for block_number in range(start, head + 1):
             try:
-                block = self.w3.eth.get_block(block_number, full_transactions=True)
+                block = rpc_call(
+                    lambda n=block_number: self.w3.eth.get_block(n, full_transactions=True)
+                )
             except Exception as exc:
                 log.warning("Failed to fetch block %s: %s", block_number, exc)
-                continue
+                # Keep progress up to the last successful block so we retry later.
+                self.last_block = last_ok
+                raise
 
             for tx in block.transactions:
                 candidate = self._inspect_tx(tx, block_number)
                 if candidate:
                     found.append(candidate)
+            last_ok = block_number
 
         self.last_block = head
         return found
@@ -128,7 +135,7 @@ class WalletWatcher:
         receipt_mint = False
         tx_hash = _normalize_hex(tx.get("hash"))
         try:
-            receipt = self.w3.eth.get_transaction_receipt(tx_hash)
+            receipt = rpc_call(lambda: self.w3.eth.get_transaction_receipt(tx_hash))
             receipt_mint = self._receipt_shows_mint(receipt)
             if receipt_mint:
                 looks_like_mint = True
