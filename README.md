@@ -118,7 +118,84 @@ If Telegram shows `Remote end closed connection` / watcher RPC blips, the public
 4. When a mint is detected you should get a simulation result without spending gas
 5. Only then set `DRY_RUN=false` and fund your wallet with a little ETH on Robinhood Chain
 
-## Important limits
+## Run 24/7 on a VPS (laptop can be off)
+
+The bot only runs where `python main.py` is executing. Put it on your VPS so it keeps minting while your laptop is asleep/off.
+
+### 1. SSH into the VPS
+
+```bash
+ssh ubuntu@YOUR_VPS_IP
+```
+
+(Use your real username/IP.)
+
+### 2. Install Python + git
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git
+```
+
+### 3. Get the bot code
+
+```bash
+cd ~
+git clone -b cursor/robinhood-nft-copy-bot-1e4f https://github.com/Adebanjo79/Telegrambot.git robinhood-nft-copy-bot
+cd robinhood-nft-copy-bot
+```
+
+Or upload the folder from your laptop with `scp` / SFTP.
+
+### 4. Create `.env` on the VPS
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Paste the same values from your laptop `.env` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_ID`, `TARGET_WALLETS`, `PRIVATE_KEY`, Alchemy `RPC_URL`, `DRY_RUN=false`).
+
+### 5. Install deps
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 6. Test once
+
+```bash
+python main.py
+```
+
+Confirm Telegram gets the online message, then press `Ctrl+C`.
+
+### 7. Run forever with systemd
+
+Edit `deploy/nft-copy-bot.service` if your username/path differ, then:
+
+```bash
+sudo cp deploy/nft-copy-bot.service /etc/systemd/system/nft-copy-bot.service
+sudo nano /etc/systemd/system/nft-copy-bot.service   # fix User= and paths if needed
+sudo systemctl daemon-reload
+sudo systemctl enable --now nft-copy-bot
+sudo systemctl status nft-copy-bot
+```
+
+Useful commands:
+
+```bash
+sudo systemctl restart nft-copy-bot
+sudo systemctl stop nft-copy-bot
+journalctl -u nft-copy-bot -f
+```
+
+After this, you can turn the laptop off. Control the bot from Telegram (`/status`, `/pause`, `/resume`).
+
+**Important:** stop the bot on your laptop first so you don’t run two copies with the same wallet at once.
+
 
 - Best for **public / free** mints where calldata is not tied to the target wallet
 - Will **fail safely after simulation** if the mint needs a whitelist, Merkle proof, signature, or allowlist for the other address

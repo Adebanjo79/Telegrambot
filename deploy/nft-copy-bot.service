@@ -1,0 +1,16 @@
+[Unit]
+Description=Robinhood Chain NFT Copy Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/robinhood-nft-copy-bot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/robinhood-nft-copy-bot/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
