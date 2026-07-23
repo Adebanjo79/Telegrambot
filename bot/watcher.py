@@ -95,9 +95,13 @@ class WalletWatcher:
                     lambda n=block_number: self.w3.eth.get_block(n, full_transactions=True)
                 )
             except Exception as exc:
+                msg = str(exc).lower()
                 log.warning("Failed to fetch block %s: %s", block_number, exc)
                 # Keep progress up to the last successful block so we retry later.
                 self.last_block = last_ok
+                # Missing/reorged blocks are common on fast L2 RPCs — retry next poll.
+                if "not found" in msg or "header not found" in msg or "block with id" in msg:
+                    return found
                 raise
 
             for tx in block.transactions:

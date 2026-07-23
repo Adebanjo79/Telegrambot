@@ -23,6 +23,9 @@ RETRY_HINTS = (
     "429",
     "too many requests",
     "broken pipe",
+    "not found",
+    "block with id",
+    "header not found",
 )
 
 
