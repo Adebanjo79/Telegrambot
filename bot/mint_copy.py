@@ -19,11 +19,15 @@ SEADROP = "0x00005ea00ac477b1030ce78506496e8c2de24bf5"
 SEADROP_MINT_PUBLIC = "0x161ac21f"
 # mintAllowList(...) — still needs the target's merkle proof; rewriting alone won't help
 SEADROP_MINT_ALLOWLIST = "0x8d7f0ad4"
+# mintSigned(...) — signature is bound to the original minter; not copyable
+SEADROP_MINT_SIGNED = "0x4b61cd6f"
 
 KNOWN_ERRORS = {
     "0x1fe7da08": "PayerNotAllowed (SeaDrop: calldata still pointed at another wallet)",
     "0x815e1d64": "OnlyAllowedSeaDrop",
     "0xd05cb32e": "MintQuantityExceedsMaxSupply",
+    "0xd855c4f4": "InvalidSignature (signed/allowlist mint for another wallet)",
+    "0x7f023c72": "InvalidAuthSignature (auth-signed mint; not copyable)",
 }
 
 
@@ -62,6 +66,9 @@ def rewrite_calldata_for_my_wallet(
 
     if contract == SEADROP and selector == SEADROP_MINT_ALLOWLIST:
         return data, "SeaDrop allowlist mint (needs their Merkle proof — usually not copyable)"
+
+    if contract == SEADROP and selector == SEADROP_MINT_SIGNED:
+        return data, "SeaDrop mintSigned (signature bound to their wallet — not copyable)"
 
     target_word = _addr_word(target_wallet)
     my_word = _addr_word(my_wallet)
@@ -115,6 +122,9 @@ class MintCopyService:
                 candidate.contract_address,
             )
             log.info("Calldata adapt: %s", rewrite_note)
+
+            if "not copyable" in rewrite_note.lower():
+                return False, f"Skipped: {rewrite_note}", None
 
             # Try original quantity first; if SeaDrop public mint fails on amount, retry qty=1.
             attempts = [data]
