@@ -117,7 +117,11 @@ async def async_main() -> int:
     tracker = TelegramTracker(settings, watcher, mint_copy)
 
     mode = "DRY_RUN" if settings.dry_run else "LIVE"
-    log.info("Starting NFT copy bot on Robinhood Chain (%s)", settings.chain_id)
+    log.info(
+        "Starting NFT copy bot on %s (%s)",
+        settings.network_name,
+        settings.chain_id,
+    )
     log.info(
         "Mode=%s targets=%s my_wallet=%s block=%s",
         mode,
@@ -132,7 +136,7 @@ async def async_main() -> int:
 
         await tracker.notify(
             f"🟢 NFT copy bot online ({mode})\n"
-            f"Robinhood Chain id {settings.chain_id}\n"
+            f"{settings.network_name} (chain id {settings.chain_id})\n"
             f"Targets: {len(settings.target_wallets)}\n"
             f"My wallet: {mint_copy.my_wallet}\n"
             f"Free mints only: {settings.free_mints_only}\n"

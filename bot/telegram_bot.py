@@ -62,12 +62,12 @@ class TelegramTracker:
             await update.message.reply_text("Unauthorized.")
             return
         await update.message.reply_text(
-            "Robinhood Chain NFT copy bot\n\n"
+            f"{self.settings.network_name} NFT copy bot\n\n"
             "/status — watcher + wallets\n"
             "/targets — wallets being copied\n"
             "/pause — stop copying\n"
             "/resume — start copying\n"
-            "/balance — your ETH on Robinhood Chain\n"
+            f"/balance — your ETH on {self.settings.network_name}\n"
             "/help — this message\n\n"
             "Alerts are pushed here when a watched wallet mints."
         )
@@ -80,7 +80,7 @@ class TelegramTracker:
         await update.message.reply_text(
             f"Enabled: {self.watcher.enabled}\n"
             f"Mode: {mode}\n"
-            f"Network: Robinhood Chain ({self.settings.chain_id})\n"
+            f"Network: {self.settings.network_name} ({self.settings.chain_id})\n"
             f"RPC: {self.settings.rpc_url}\n"
             f"My wallet: {self.mint_copy.my_wallet}\n"
             f"Last block: {self.watcher.last_block}\n"

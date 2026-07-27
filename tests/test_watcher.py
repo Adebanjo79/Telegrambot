@@ -27,6 +27,7 @@ def _settings(**overrides) -> Settings:
         rpc_url="https://rpc.mainnet.chain.robinhood.com",
         chain_id=4663,
         explorer_url="https://robinhoodchain.blockscout.com",
+        network_name="Robinhood Chain",
         target_wallets=(Web3.to_checksum_address("0x" + "11" * 20),),
         private_key="0x" + "ab" * 32,
         my_wallet=Web3.to_checksum_address("0x" + "22" * 20),

@@ -1,16 +1,57 @@
-# Robinhood Chain NFT Copy Bot (Telegram)
+# EVM NFT Copy Bot (Telegram) — Robinhood Chain + Ethereum
 
-Python bot that watches wallet(s) on **Robinhood Chain** (Ethereum L2, chain id `4663`). When a watched wallet mints an NFT, the bot detects it, optionally copies the same calldata from **your** wallet, and pushes live status to Telegram.
+Python bot that watches wallet(s) on an EVM chain (Robinhood Chain `4663` or **Ethereum Mainnet** `1`). When a watched wallet mints an NFT, the bot detects it, optionally copies the call from **your** wallet, and pushes live status to Telegram.
 
 ## What it does
 
-1. Polls Robinhood Chain for transactions from `TARGET_WALLETS`
+1. Polls the configured chain for transactions from `TARGET_WALLETS`
 2. Detects mint-like activity (common `mint` / `claim` selectors, or ERC-721/1155 `Transfer` from `0x0`)
-3. Simulates the same call from your wallet, then broadcasts (unless `DRY_RUN=true`)
+3. Adapts SeaDrop `mintPublic` calldata to your wallet, simulates, then broadcasts (unless `DRY_RUN=true`)
 4. Sends detection / success / failure alerts to your Telegram account
 5. Lets you `/pause`, `/resume`, check `/status` and `/balance` from Telegram
 
-## Quick start
+## Ethereum Mainnet setup
+
+Same bot code — point `.env` at Ethereum:
+
+```bash
+cp .env.ethereum.example .env
+# fill TELEGRAM_*, TARGET_WALLETS, PRIVATE_KEY
+# set RPC_URL to Alchemy/Infura/QuickNode Ethereum URL when possible
+python main.py
+```
+
+Key Ethereum values:
+
+| Variable | Value |
+|---|---|
+| `CHAIN_ID` | `1` |
+| `NETWORK_NAME` | `Ethereum Mainnet` |
+| `RPC_URL` | `https://ethereum.publicnode.com` (free) or Alchemy/Infura |
+| `EXPLORER_URL` | `https://etherscan.io` |
+| `DRY_RUN` | keep `true` first — Ethereum gas is expensive |
+| `POLL_INTERVAL_SEC` | `2.0` recommended on public RPC |
+
+### Run Ethereum bot on VPS (alongside Robinhood bot)
+
+```bash
+cd ~
+git clone -b cursor/ethereum-nft-copy-bot-1e4f https://github.com/Adebanjo79/Telegrambot.git ethereum-nft-copy-bot
+cd ethereum-nft-copy-bot
+cp .env.ethereum.example .env
+nano .env   # fill values, CHAIN_ID=1, Ethereum RPC
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python main.py   # test, then Ctrl+C
+sudo cp deploy/eth-nft-copy-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now eth-nft-copy-bot
+sudo systemctl status eth-nft-copy-bot
+```
+
+Use a **different Telegram bot token** than the Robinhood bot if you run both, or the same token only if you use different owner chats carefully (same token + same owner is OK for two bots but alerts will mix).
+
+## Robinhood Chain quick start
 
 ### Option A — clone from GitHub (recommended on Windows)
 

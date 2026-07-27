@@ -33,6 +33,7 @@ class Settings:
     rpc_url: str
     chain_id: int
     explorer_url: str
+    network_name: str
     target_wallets: tuple[str, ...]
     private_key: str
     my_wallet: str
@@ -41,6 +42,15 @@ class Settings:
     poll_interval_sec: float
     gas_limit: int
     max_catchup_blocks: int
+
+    @staticmethod
+    def network_label(chain_id: int) -> str:
+        return {
+            1: "Ethereum Mainnet",
+            11155111: "Ethereum Sepolia",
+            4663: "Robinhood Chain",
+            46630: "Robinhood Chain Testnet",
+        }.get(chain_id, f"Chain {chain_id}")
 
     @classmethod
     def load(cls, env_file: str | None = ".env") -> "Settings":
@@ -100,14 +110,27 @@ class Settings:
                 "TELEGRAM_OWNER_ID must be your numeric Telegram user id from @userinfobot"
             ) from exc
 
+        chain_id = int(_opt("CHAIN_ID", "4663"))
+        default_explorer = {
+            1: "https://etherscan.io",
+            11155111: "https://sepolia.etherscan.io",
+            4663: "https://robinhoodchain.blockscout.com",
+            46630: "https://explorer.testnet.chain.robinhood.com",
+        }.get(chain_id, "https://robinhoodchain.blockscout.com")
+        default_rpc = {
+            1: "https://ethereum.publicnode.com",
+            11155111: "https://ethereum-sepolia-rpc.publicnode.com",
+            4663: "https://rpc.mainnet.chain.robinhood.com",
+            46630: "https://rpc.testnet.chain.robinhood.com",
+        }.get(chain_id, "https://rpc.mainnet.chain.robinhood.com")
+
         return cls(
             telegram_bot_token=_req("TELEGRAM_BOT_TOKEN"),
             telegram_owner_id=owner_id,
-            rpc_url=_opt("RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
-            chain_id=int(_opt("CHAIN_ID", "4663")),
-            explorer_url=_opt("EXPLORER_URL", "https://robinhoodchain.blockscout.com").rstrip(
-                "/"
-            ),
+            rpc_url=_opt("RPC_URL", default_rpc),
+            chain_id=chain_id,
+            explorer_url=_opt("EXPLORER_URL", default_explorer).rstrip("/"),
+            network_name=_opt("NETWORK_NAME", cls.network_label(chain_id)),
             target_wallets=targets,
             private_key=private_key,
             my_wallet=account.address,
