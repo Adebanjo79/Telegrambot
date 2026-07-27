@@ -28,6 +28,7 @@ KNOWN_ERRORS = {
     "0xd05cb32e": "MintQuantityExceedsMaxSupply",
     "0xd855c4f4": "InvalidSignature (signed/allowlist mint for another wallet)",
     "0x7f023c72": "InvalidAuthSignature (auth-signed mint; not copyable)",
+    "0xedc01273": "MintQuantityExceedsMaxMintedPerWallet (you already hit this drop's wallet limit)",
 }
 
 
