@@ -17,6 +17,8 @@ RETRY_HINTS = (
     "connection reset",
     "timed out",
     "timeout",
+    "deadline exceeded",
+    "context deadline",
     "temporarily unavailable",
     "503",
     "502",
@@ -26,6 +28,7 @@ RETRY_HINTS = (
     "not found",
     "block with id",
     "header not found",
+    "-32000",
 )
 
 
