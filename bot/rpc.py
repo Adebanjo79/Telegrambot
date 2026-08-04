@@ -15,6 +15,8 @@ RETRY_HINTS = (
     "remote end closed",
     "connection aborted",
     "connection reset",
+    "connection refused",
+    "connect: connection refused",
     "timed out",
     "timeout",
     "deadline exceeded",
