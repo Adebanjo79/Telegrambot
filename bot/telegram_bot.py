@@ -36,6 +36,7 @@ class TelegramTracker:
         self.app.add_handler(CommandHandler("resume", self.cmd_resume))
         self.app.add_handler(CommandHandler("balance", self.cmd_balance))
         self.app.add_handler(CommandHandler("targets", self.cmd_targets))
+        self.app.add_handler(CommandHandler("wallets", self.cmd_wallets))
 
     def _authorized(self, update: Update) -> bool:
         user = update.effective_user
@@ -65,9 +66,10 @@ class TelegramTracker:
             "Robinhood Chain NFT copy bot\n\n"
             "/status — watcher + wallets\n"
             "/targets — wallets being copied\n"
+            "/wallets — your minting wallets\n"
             "/pause — stop copying\n"
             "/resume — start copying\n"
-            "/balance — your ETH on Robinhood Chain\n"
+            "/balance — ETH balances for minting wallets\n"
             "/help — this message\n\n"
             "Alerts are pushed here when a watched wallet mints."
         )
@@ -82,7 +84,8 @@ class TelegramTracker:
             f"Mode: {mode}\n"
             f"Network: Robinhood Chain ({self.settings.chain_id})\n"
             f"RPC: {self.settings.rpc_url}\n"
-            f"My wallet: {self.mint_copy.my_wallet}\n"
+            f"Minting wallets: {len(self.mint_copy.my_wallets)}\n"
+            f"Primary wallet: {self.mint_copy.my_wallet}\n"
             f"Last block: {self.watcher.last_block}\n"
             f"Free mints only: {self.settings.free_mints_only}\n"
             f"Targets: {len(self.settings.target_wallets)}"
@@ -94,6 +97,15 @@ class TelegramTracker:
             return
         lines = ["Watching:"]
         for addr in self.settings.target_wallets:
+            lines.append(f"• {addr}")
+        await update.message.reply_text("\n".join(lines))
+
+    async def cmd_wallets(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            await update.message.reply_text("Unauthorized.")
+            return
+        lines = ["Minting wallets:"]
+        for addr in self.mint_copy.my_wallets:
             lines.append(f"• {addr}")
         await update.message.reply_text("\n".join(lines))
 
@@ -116,10 +128,9 @@ class TelegramTracker:
             await update.message.reply_text("Unauthorized.")
             return
         try:
-            bal = self.mint_copy.eth_balance()
-            await update.message.reply_text(
-                f"Balance: {bal} ETH\nWallet: {self.mint_copy.my_wallet}\n"
-                f"{self.explorer_address(self.mint_copy.my_wallet)}"
-            )
+            lines = ["Balances:"]
+            for wallet, bal in self.mint_copy.all_balances():
+                lines.append(f"{wallet}\n{bal} ETH")
+            await update.message.reply_text("\n\n".join(lines))
         except Exception as exc:
             await update.message.reply_text(f"Balance check failed: {exc}")

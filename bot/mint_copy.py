@@ -91,17 +91,24 @@ def friendly_revert(exc: BaseException) -> str:
 
 
 class MintCopyService:
-    """Simulate then (optionally) broadcast a copy of a mint-style call."""
+    """Simulate then (optionally) broadcast copy mints from one or more wallets."""
 
     def __init__(self, settings: Settings, w3: Web3) -> None:
         self.settings = settings
         self.w3 = w3
-        self.account: LocalAccount = Account.from_key(settings.private_key)
+        self.accounts: list[LocalAccount] = [
+            Account.from_key(k) for k in settings.private_keys
+        ]
+        self.account: LocalAccount = self.accounts[0]
         self._copied: set[str] = set()
 
     @property
     def my_wallet(self) -> str:
         return self.account.address
+
+    @property
+    def my_wallets(self) -> list[str]:
+        return [a.address for a in self.accounts]
 
     def already_copied(self, source_tx_hash: str) -> bool:
         return source_tx_hash.lower() in self._copied
@@ -109,25 +116,47 @@ class MintCopyService:
     def mark_copied(self, source_tx_hash: str) -> None:
         self._copied.add(source_tx_hash.lower())
 
-    def try_copy(self, candidate: MintCandidate) -> tuple[bool, str, str | None]:
+    def try_copy_all(
+        self, candidate: MintCandidate
+    ) -> list[tuple[str, bool, str, str | None]]:
+        """
+        Copy the mint with every configured minting wallet.
+        Returns list of (wallet, ok, message, tx_hash).
+        """
         if self.already_copied(candidate.source_tx_hash):
-            return False, "Already processed this source tx.", None
+            return [
+                (self.my_wallet, False, "Already processed this source tx.", None)
+            ]
 
         self.mark_copied(candidate.source_tx_hash)
+        results: list[tuple[str, bool, str, str | None]] = []
+        for account in self.accounts:
+            ok, message, tx_hash = self._try_copy_with(account, candidate)
+            results.append((account.address, ok, message, tx_hash))
+        return results
 
+    def try_copy(self, candidate: MintCandidate) -> tuple[bool, str, str | None]:
+        """Backward-compatible single-wallet copy (first minting wallet). """
+        results = self.try_copy_all(candidate)
+        _, ok, message, tx_hash = results[0]
+        return ok, message, tx_hash
+
+    def _try_copy_with(
+        self, account: LocalAccount, candidate: MintCandidate
+    ) -> tuple[bool, str, str | None]:
+        my_wallet = account.address
         try:
             data, rewrite_note = rewrite_calldata_for_my_wallet(
                 candidate.input_data,
                 candidate.target_wallet,
-                self.my_wallet,
+                my_wallet,
                 candidate.contract_address,
             )
-            log.info("Calldata adapt: %s", rewrite_note)
+            log.info("Calldata adapt [%s]: %s", my_wallet, rewrite_note)
 
             if "not copyable" in rewrite_note.lower():
                 return False, f"Skipped: {rewrite_note}", None
 
-            # Try original quantity first; if SeaDrop public mint fails on amount, retry qty=1.
             attempts = [data]
             if (
                 candidate.contract_address.lower() == SEADROP
@@ -141,7 +170,7 @@ class MintCopyService:
             last_err = ""
             for attempt_i, attempt_data in enumerate(attempts):
                 tx: dict = {
-                    "from": self.my_wallet,
+                    "from": my_wallet,
                     "to": Web3.to_checksum_address(candidate.contract_address),
                     "data": attempt_data,
                     "value": candidate.value_wei,
@@ -166,7 +195,11 @@ class MintCopyService:
                 except ContractLogicError as exc:
                     last_err = friendly_revert(exc)
                     if attempt_i < len(attempts) - 1:
-                        log.info("Sim failed (%s); retrying with quantity=1", last_err)
+                        log.info(
+                            "Sim failed for %s (%s); retrying with quantity=1",
+                            my_wallet,
+                            last_err,
+                        )
                         continue
                     return (
                         False,
@@ -187,8 +220,8 @@ class MintCopyService:
                         None,
                     )
 
-                tx["nonce"] = self.w3.eth.get_transaction_count(self.my_wallet, "pending")
-                signed = self.account.sign_transaction(tx)
+                tx["nonce"] = self.w3.eth.get_transaction_count(my_wallet, "pending")
+                signed = account.sign_transaction(tx)
                 raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
                 tx_hash = self.w3.eth.send_raw_transaction(raw)
                 hex_hash = tx_hash.hex()
@@ -198,9 +231,13 @@ class MintCopyService:
 
             return False, f"Simulation reverted: {last_err}", None
         except Exception as exc:
-            log.exception("Copy mint failed")
+            log.exception("Copy mint failed for %s", my_wallet)
             return False, f"Copy mint failed: {exc}", None
 
-    def eth_balance(self) -> Decimal:
-        wei = self.w3.eth.get_balance(self.my_wallet)
+    def eth_balance(self, wallet: str | None = None) -> Decimal:
+        address = wallet or self.my_wallet
+        wei = self.w3.eth.get_balance(address)
         return Decimal(wei) / Decimal(10**18)
+
+    def all_balances(self) -> list[tuple[str, Decimal]]:
+        return [(w, self.eth_balance(w)) for w in self.my_wallets]

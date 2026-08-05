@@ -50,22 +50,24 @@ async def watch_loop(
                         f"Value: {candidate.value_eth} ETH\n"
                         f"Hint: {candidate.method_hint}\n"
                         f"Source: {tracker.explorer_tx(candidate.source_tx_hash)}\n"
+                        f"Minting wallets: {len(mint_copy.my_wallets)}\n"
                         f"{'Simulating (DRY_RUN)…' if settings.dry_run else 'Copying…'}"
                     )
 
-                    ok, message, copy_hash = await asyncio.to_thread(
-                        mint_copy.try_copy, candidate
-                    )
-                    if ok and copy_hash:
-                        await tracker.notify(
-                            f"✅ Copy mint sent\n"
-                            f"{tracker.explorer_tx(copy_hash)}\n"
-                            f"{message}"
-                        )
-                    elif ok:
-                        await tracker.notify(f"✅ {message}")
-                    else:
-                        await tracker.notify(f"❌ Copy mint not sent\n{message}")
+                    results = await asyncio.to_thread(mint_copy.try_copy_all, candidate)
+                    for wallet, ok, message, copy_hash in results:
+                        prefix = f"Wallet `{wallet}`\n"
+                        if ok and copy_hash:
+                            await tracker.notify(
+                                f"✅ Copy mint sent\n"
+                                f"{prefix}"
+                                f"{tracker.explorer_tx(copy_hash)}\n"
+                                f"{message}"
+                            )
+                        elif ok:
+                            await tracker.notify(f"✅ {prefix}{message}")
+                        else:
+                            await tracker.notify(f"❌ Copy mint not sent\n{prefix}{message}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -134,7 +136,8 @@ async def async_main() -> int:
             f"🟢 NFT copy bot online ({mode})\n"
             f"Robinhood Chain id {settings.chain_id}\n"
             f"Targets: {len(settings.target_wallets)}\n"
-            f"My wallet: {mint_copy.my_wallet}\n"
+            f"Minting wallets: {len(settings.my_wallets)}\n"
+            f"Primary wallet: {mint_copy.my_wallet}\n"
             f"Free mints only: {settings.free_mints_only}\n"
             f"Starting at block {head}"
         )

@@ -21,6 +21,7 @@ from bot.mint_copy import MintCopyService
 
 
 def _settings(**overrides) -> Settings:
+    pk = "0x" + "ab" * 32
     base = dict(
         telegram_bot_token="x",
         telegram_owner_id=1,
@@ -28,7 +29,9 @@ def _settings(**overrides) -> Settings:
         chain_id=4663,
         explorer_url="https://robinhoodchain.blockscout.com",
         target_wallets=(Web3.to_checksum_address("0x" + "11" * 20),),
-        private_key="0x" + "ab" * 32,
+        private_keys=(pk,),
+        my_wallets=(Web3.to_checksum_address("0x" + "22" * 20),),
+        private_key=pk,
         my_wallet=Web3.to_checksum_address("0x" + "22" * 20),
         free_mints_only=True,
         dry_run=True,
@@ -150,3 +153,35 @@ def test_mint_copy_dry_run_success():
     assert "DRY_RUN" in message
     assert tx_hash is None
     assert service.already_copied(candidate.source_tx_hash)
+
+
+def test_try_copy_all_runs_for_each_wallet():
+    pk1 = "0x" + "ab" * 32
+    pk2 = "0x" + "cd" * 32
+    from eth_account import Account
+
+    settings = _settings(
+        dry_run=True,
+        private_keys=(pk1, pk2),
+        my_wallets=(Account.from_key(pk1).address, Account.from_key(pk2).address),
+        private_key=pk1,
+        my_wallet=Account.from_key(pk1).address,
+    )
+    w3 = MagicMock()
+    w3.eth.get_block.return_value = {"baseFeePerGas": 100}
+    w3.eth.call.return_value = b""
+    w3.to_wei.return_value = 50_000_000
+    service = MintCopyService(settings, w3)
+    candidate = MintCandidate(
+        source_tx_hash="0x" + "11" * 32,
+        contract_address=Web3.to_checksum_address("0x" + "66" * 20),
+        input_data="0xa0712d68" + "0" * 64,
+        value_wei=0,
+        value_eth=Decimal(0),
+        block_number=1,
+        method_hint="mint(uint256)",
+        target_wallet=settings.target_wallets[0],
+    )
+    results = service.try_copy_all(candidate)
+    assert len(results) == 2
+    assert all(ok for _, ok, _, _ in results)
