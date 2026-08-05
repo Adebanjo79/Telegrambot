@@ -8,8 +8,9 @@ from eth_account.signers.local import LocalAccount
 from web3 import Web3
 from web3.exceptions import ContractLogicError
 
-from bot.config import Settings
+from bot.config import Settings, _normalize_private_key
 from bot.models import MintCandidate
+from bot.wallet_store import DEFAULT_STORE, load_extra_keys, merge_keys, save_keys
 
 log = logging.getLogger(__name__)
 
@@ -96,11 +97,55 @@ class MintCopyService:
     def __init__(self, settings: Settings, w3: Web3) -> None:
         self.settings = settings
         self.w3 = w3
-        self.accounts: list[LocalAccount] = [
-            Account.from_key(k) for k in settings.private_keys
-        ]
-        self.account: LocalAccount = self.accounts[0]
+        self.store_path = DEFAULT_STORE
         self._copied: set[str] = set()
+        self.reload_accounts()
+
+    def reload_accounts(self) -> None:
+        keys = merge_keys(self.settings.private_keys, self.store_path)
+        if not keys:
+            raise ValueError("No minting private keys configured")
+        self.accounts: list[LocalAccount] = [Account.from_key(k) for k in keys]
+        self._key_by_addr = {
+            Account.from_key(k).address.lower(): k for k in keys
+        }
+        self.account: LocalAccount = self.accounts[0]
+
+    def add_private_key(self, raw_key: str) -> str:
+        key = _normalize_private_key(raw_key)
+        addr = Account.from_key(key).address
+        env_addrs = {
+            Account.from_key(k).address.lower() for k in self.settings.private_keys
+        }
+        if addr.lower() in env_addrs:
+            self.reload_accounts()
+            return addr
+
+        existing = load_extra_keys(self.store_path)
+        extra_map = {Account.from_key(k).address.lower(): k for k in existing}
+        extra_map[addr.lower()] = key
+        save_keys(list(extra_map.values()), self.store_path)
+        self.reload_accounts()
+        return addr
+
+    def remove_wallet(self, address: str) -> bool:
+        addr = Web3.to_checksum_address(address).lower()
+        env_addrs = {
+            Account.from_key(k).address.lower() for k in self.settings.private_keys
+        }
+        if addr in env_addrs:
+            raise ValueError(
+                "That wallet comes from .env PRIVATE_KEY(S). Remove it from .env instead."
+            )
+        existing = load_extra_keys(self.store_path)
+        remaining = [
+            k for k in existing if Account.from_key(k).address.lower() != addr
+        ]
+        if len(remaining) == len(existing):
+            return False
+        save_keys(remaining, self.store_path)
+        self.reload_accounts()
+        return True
 
     @property
     def my_wallet(self) -> str:

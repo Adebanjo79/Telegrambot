@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from bot.config import Settings
 from bot.mint_copy import MintCopyService
 from bot.watcher import WalletWatcher
 
 log = logging.getLogger(__name__)
+
+_KEY_RE = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
 
 
 class TelegramTracker:
@@ -37,6 +40,12 @@ class TelegramTracker:
         self.app.add_handler(CommandHandler("balance", self.cmd_balance))
         self.app.add_handler(CommandHandler("targets", self.cmd_targets))
         self.app.add_handler(CommandHandler("wallets", self.cmd_wallets))
+        self.app.add_handler(CommandHandler("addwallet", self.cmd_addwallet))
+        self.app.add_handler(CommandHandler("removewallet", self.cmd_removewallet))
+        # Also accept a bare private key message from owner (DM only recommended)
+        self.app.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text_key)
+        )
 
     def _authorized(self, update: Update) -> bool:
         user = update.effective_user
@@ -67,11 +76,14 @@ class TelegramTracker:
             "/status — watcher + wallets\n"
             "/targets — wallets being copied\n"
             "/wallets — your minting wallets\n"
+            "/addwallet <private_key> — add minting wallet\n"
+            "/removewallet <address> — remove Telegram-added wallet\n"
             "/pause — stop copying\n"
             "/resume — start copying\n"
             "/balance — ETH balances for minting wallets\n"
             "/help — this message\n\n"
-            "Alerts are pushed here when a watched wallet mints."
+            "⚠️ Only send private keys in a private chat with this bot.\n"
+            "Delete the message after adding."
         )
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -108,6 +120,64 @@ class TelegramTracker:
         for addr in self.mint_copy.my_wallets:
             lines.append(f"• {addr}")
         await update.message.reply_text("\n".join(lines))
+
+    async def cmd_addwallet(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            await update.message.reply_text("Unauthorized.")
+            return
+        if not context.args:
+            await update.message.reply_text(
+                "Usage:\n/addwallet 0xyourprivatekey\n\n"
+                "Or just paste the private key alone in this private chat."
+            )
+            return
+        raw = context.args[0].strip()
+        try:
+            addr = self.mint_copy.add_private_key(raw)
+        except Exception as exc:
+            await update.message.reply_text(f"Failed to add wallet: {exc}")
+            return
+        await update.message.reply_text(
+            f"✅ Added minting wallet:\n{addr}\n"
+            f"Total minting wallets: {len(self.mint_copy.my_wallets)}\n\n"
+            "Please delete your /addwallet message that contains the key."
+        )
+
+    async def cmd_removewallet(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            await update.message.reply_text("Unauthorized.")
+            return
+        if not context.args:
+            await update.message.reply_text("Usage:\n/removewallet 0xAddress")
+            return
+        try:
+            removed = self.mint_copy.remove_wallet(context.args[0].strip())
+        except Exception as exc:
+            await update.message.reply_text(f"Failed: {exc}")
+            return
+        if not removed:
+            await update.message.reply_text("Wallet not found in Telegram-added list.")
+            return
+        await update.message.reply_text(
+            f"🗑 Removed.\nMinting wallets now: {len(self.mint_copy.my_wallets)}"
+        )
+
+    async def on_text_key(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update) or not update.message or not update.message.text:
+            return
+        text = update.message.text.strip()
+        if not _KEY_RE.match(text):
+            return
+        try:
+            addr = self.mint_copy.add_private_key(text)
+        except Exception as exc:
+            await update.message.reply_text(f"Failed to add wallet: {exc}")
+            return
+        await update.message.reply_text(
+            f"✅ Added minting wallet:\n{addr}\n"
+            f"Total minting wallets: {len(self.mint_copy.my_wallets)}\n\n"
+            "Please delete the message that contained your private key."
+        )
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
