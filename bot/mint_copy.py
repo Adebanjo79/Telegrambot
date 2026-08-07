@@ -111,6 +111,15 @@ class MintCopyService:
             Account.from_key(k).address.lower(): k for k in keys
         }
         self.account: LocalAccount = self.accounts[0]
+        env_n = len(self.settings.private_keys)
+        file_n = max(0, len(self.accounts) - env_n)
+        log.info(
+            "Loaded %s minting wallet(s): %s from .env, %s from %s",
+            len(self.accounts),
+            env_n,
+            file_n,
+            self.store_path,
+        )
 
     def add_private_key(self, raw_key: str) -> str:
         key = _normalize_private_key(raw_key)
@@ -175,10 +184,33 @@ class MintCopyService:
             ]
 
         self.mark_copied(candidate.source_tx_hash)
+        # Snapshot so /addwallet during a run can't shrink/skip the list mid-loop.
+        accounts = list(self.accounts)
+        log.info(
+            "Copying mint %s with %s wallet(s)",
+            candidate.source_tx_hash,
+            len(accounts),
+        )
         results: list[tuple[str, bool, str, str | None]] = []
-        for account in self.accounts:
-            ok, message, tx_hash = self._try_copy_with(account, candidate)
-            results.append((account.address, ok, message, tx_hash))
+        for i, account in enumerate(accounts):
+            try:
+                ok, message, tx_hash = self._try_copy_with(account, candidate)
+                results.append((account.address, ok, message, tx_hash))
+                log.info(
+                    "Wallet %s/%s %s -> ok=%s",
+                    i + 1,
+                    len(accounts),
+                    account.address,
+                    ok,
+                )
+            except Exception as exc:
+                log.exception("Wallet copy crashed for %s", account.address)
+                results.append(
+                    (account.address, False, f"Copy crashed: {exc}", None)
+                )
+            # Small gap so RPC/node can settle between wallets.
+            if i < len(accounts) - 1:
+                time.sleep(0.35)
         return results
 
     def try_copy(self, candidate: MintCandidate) -> tuple[bool, str, str | None]:

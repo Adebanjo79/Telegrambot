@@ -146,11 +146,15 @@ async def async_main() -> int:
         await tracker.app.start()
         await tracker.app.updater.start_polling(drop_pending_updates=True)
 
+        env_n = len(settings.private_keys)
+        total_n = len(mint_copy.my_wallets)
+        file_n = max(0, total_n - env_n)
         await tracker.notify(
             f"🟢 NFT copy bot online ({mode})\n"
             f"Robinhood Chain id {settings.chain_id}\n"
             f"Targets: {len(settings.target_wallets)}\n"
-            f"Minting wallets: {len(mint_copy.my_wallets)}\n"
+            f"Minting wallets: {total_n} "
+            f"({env_n} from .env, {file_n} from mint_wallets.json)\n"
             f"Primary wallet: {mint_copy.my_wallet}\n"
             f"Free mints only: {settings.free_mints_only}\n"
             f"Starting at block {head}"
