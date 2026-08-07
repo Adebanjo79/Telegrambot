@@ -10,7 +10,7 @@ from bot.config import _normalize_private_key
 
 log = logging.getLogger(__name__)
 
-DEFAULT_STORE = Path("mint_wallets.json")
+DEFAULT_STORE = Path(__file__).resolve().parent.parent / "mint_wallets.json"
 
 
 def load_extra_keys(path: Path = DEFAULT_STORE) -> list[str]:

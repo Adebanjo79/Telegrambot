@@ -150,7 +150,7 @@ async def async_main() -> int:
             f"🟢 NFT copy bot online ({mode})\n"
             f"Robinhood Chain id {settings.chain_id}\n"
             f"Targets: {len(settings.target_wallets)}\n"
-            f"Minting wallets: {len(settings.my_wallets)}\n"
+            f"Minting wallets: {len(mint_copy.my_wallets)}\n"
             f"Primary wallet: {mint_copy.my_wallet}\n"
             f"Free mints only: {settings.free_mints_only}\n"
             f"Starting at block {head}"
