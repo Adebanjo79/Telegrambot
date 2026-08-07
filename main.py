@@ -50,38 +50,52 @@ async def watch_loop(
                         f"Value: {candidate.value_eth} ETH\n"
                         f"Hint: {candidate.method_hint}\n"
                         f"Source: {tracker.explorer_tx(candidate.source_tx_hash)}\n"
-                        f"Minting wallets: {len(mint_copy.my_wallets)}\n"
+                        f"Minting wallets: {len(mint_copy.my_wallets)} (parallel)\n"
                         f"{'Simulating (DRY_RUN)…' if settings.dry_run else 'Copying…'}"
                     )
 
                     results = await asyncio.to_thread(mint_copy.try_copy_all, candidate)
                     ok_n = sum(1 for _, ok, _, _ in results if ok)
                     fail_n = len(results) - ok_n
+                    # One combined Telegram message so rate limits don't drop
+                    # per-wallet results (this was hiding failures before).
+                    lines = [
+                        f"Done for this mint: {ok_n} ok, {fail_n} failed "
+                        f"(tried {len(results)} wallets)."
+                    ]
                     for wallet, ok, message, copy_hash in results:
-                        prefix = f"Wallet `{wallet}`\n"
-                        try:
-                            if ok and copy_hash:
-                                await tracker.notify(
-                                    f"✅ Copy mint sent\n"
-                                    f"{prefix}"
-                                    f"{tracker.explorer_tx(copy_hash)}\n"
-                                    f"{message}"
-                                )
-                            elif ok:
-                                await tracker.notify(f"✅ {prefix}{message}")
-                            else:
-                                await tracker.notify(
-                                    f"❌ Copy mint not sent\n{prefix}{message}"
-                                )
-                        except Exception:
-                            log.exception("Failed notifying result for %s", wallet)
+                        short = f"{wallet[:6]}…{wallet[-4:]}"
+                        if ok and copy_hash:
+                            lines.append(
+                                f"✅ {short}\n"
+                                f"{tracker.explorer_tx(copy_hash)}\n"
+                                f"{message}"
+                            )
+                        elif ok:
+                            lines.append(f"✅ {short}: {message}")
+                        else:
+                            lines.append(f"❌ {short}: {message}")
+                    text = "\n\n".join(lines)
+                    # Telegram hard limit ~4096; split if needed.
                     try:
-                        await tracker.notify(
-                            f"Done for this mint: {ok_n} ok, {fail_n} failed "
-                            f"(tried {len(results)} wallets)."
-                        )
+                        if len(text) <= 4000:
+                            await tracker.notify(text)
+                        else:
+                            chunk: list[str] = [lines[0]]
+                            size = len(lines[0])
+                            for line in lines[1:]:
+                                add = len(line) + 2
+                                if size + add > 4000:
+                                    await tracker.notify("\n\n".join(chunk))
+                                    chunk = [line]
+                                    size = len(line)
+                                else:
+                                    chunk.append(line)
+                                    size += add
+                            if chunk:
+                                await tracker.notify("\n\n".join(chunk))
                     except Exception:
-                        log.exception("Failed notifying mint summary")
+                        log.exception("Failed notifying mint results")
         except asyncio.CancelledError:
             raise
         except Exception as exc:

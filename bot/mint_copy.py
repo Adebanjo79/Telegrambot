@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal
-import time
 
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
@@ -175,8 +175,8 @@ class MintCopyService:
         self, candidate: MintCandidate
     ) -> list[tuple[str, bool, str, str | None]]:
         """
-        Copy the mint with every configured minting wallet.
-        Returns list of (wallet, ok, message, tx_hash).
+        Copy the mint with every configured minting wallet in parallel.
+        Returns list of (wallet, ok, message, tx_hash) in wallet order.
         """
         if self.already_copied(candidate.source_tx_hash):
             return [
@@ -187,15 +187,32 @@ class MintCopyService:
         # Snapshot so /addwallet during a run can't shrink/skip the list mid-loop.
         accounts = list(self.accounts)
         log.info(
-            "Copying mint %s with %s wallet(s)",
+            "Copying mint %s with %s wallet(s) in parallel",
             candidate.source_tx_hash,
             len(accounts),
         )
-        results: list[tuple[str, bool, str, str | None]] = []
-        for i, account in enumerate(accounts):
-            try:
-                ok, message, tx_hash = self._try_copy_with(account, candidate)
-                results.append((account.address, ok, message, tx_hash))
+        if len(accounts) == 1:
+            ok, message, tx_hash = self._try_copy_with(accounts[0], candidate)
+            return [(accounts[0].address, ok, message, tx_hash)]
+
+        results: list[tuple[str, bool, str, str | None] | None] = [None] * len(
+            accounts
+        )
+        workers = min(len(accounts), 8)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(self._try_copy_with, account, candidate): i
+                for i, account in enumerate(accounts)
+            }
+            for fut in as_completed(futures):
+                i = futures[fut]
+                account = accounts[i]
+                try:
+                    ok, message, tx_hash = fut.result()
+                except Exception as exc:
+                    log.exception("Wallet copy crashed for %s", account.address)
+                    ok, message, tx_hash = False, f"Copy crashed: {exc}", None
+                results[i] = (account.address, ok, message, tx_hash)
                 log.info(
                     "Wallet %s/%s %s -> ok=%s",
                     i + 1,
@@ -203,15 +220,7 @@ class MintCopyService:
                     account.address,
                     ok,
                 )
-            except Exception as exc:
-                log.exception("Wallet copy crashed for %s", account.address)
-                results.append(
-                    (account.address, False, f"Copy crashed: {exc}", None)
-                )
-            # Small gap so RPC/node can settle between wallets.
-            if i < len(accounts) - 1:
-                time.sleep(0.35)
-        return results
+        return [r for r in results if r is not None]
 
     def try_copy(self, candidate: MintCandidate) -> tuple[bool, str, str | None]:
         """Backward-compatible single-wallet copy (first minting wallet). """
@@ -295,6 +304,23 @@ class MintCopyService:
                             f"DRY_RUN OK — would mint {candidate.value_eth} ETH to "
                             f"{candidate.contract_address} ({qty_note})"
                         ),
+                        None,
+                    )
+
+                fee_cap = int(
+                    tx.get("maxFeePerGas") or tx.get("gasPrice") or 0
+                )
+                need = self.settings.gas_limit * fee_cap + int(candidate.value_wei)
+                try:
+                    bal = int(self.w3.eth.get_balance(my_wallet))
+                except Exception as exc:
+                    return False, f"Balance check failed: {exc}", None
+                if bal < need:
+                    have_eth = Web3.from_wei(bal, "ether")
+                    need_eth = Web3.from_wei(need, "ether")
+                    return (
+                        False,
+                        f"Insufficient ETH for gas: have {have_eth}, need ~{need_eth}",
                         None,
                     )
 
