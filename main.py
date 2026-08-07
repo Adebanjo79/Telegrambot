@@ -55,19 +55,33 @@ async def watch_loop(
                     )
 
                     results = await asyncio.to_thread(mint_copy.try_copy_all, candidate)
+                    ok_n = sum(1 for _, ok, _, _ in results if ok)
+                    fail_n = len(results) - ok_n
                     for wallet, ok, message, copy_hash in results:
                         prefix = f"Wallet `{wallet}`\n"
-                        if ok and copy_hash:
-                            await tracker.notify(
-                                f"✅ Copy mint sent\n"
-                                f"{prefix}"
-                                f"{tracker.explorer_tx(copy_hash)}\n"
-                                f"{message}"
-                            )
-                        elif ok:
-                            await tracker.notify(f"✅ {prefix}{message}")
-                        else:
-                            await tracker.notify(f"❌ Copy mint not sent\n{prefix}{message}")
+                        try:
+                            if ok and copy_hash:
+                                await tracker.notify(
+                                    f"✅ Copy mint sent\n"
+                                    f"{prefix}"
+                                    f"{tracker.explorer_tx(copy_hash)}\n"
+                                    f"{message}"
+                                )
+                            elif ok:
+                                await tracker.notify(f"✅ {prefix}{message}")
+                            else:
+                                await tracker.notify(
+                                    f"❌ Copy mint not sent\n{prefix}{message}"
+                                )
+                        except Exception:
+                            log.exception("Failed notifying result for %s", wallet)
+                    try:
+                        await tracker.notify(
+                            f"Done for this mint: {ok_n} ok, {fail_n} failed "
+                            f"(tried {len(results)} wallets)."
+                        )
+                    except Exception:
+                        log.exception("Failed notifying mint summary")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
