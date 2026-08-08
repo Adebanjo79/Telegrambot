@@ -101,6 +101,53 @@ def test_load_balance_still_fails_over_when_one_node_is_full():
     assert provider.failover_count == 1
 
 
+def test_failback_returns_to_primary_when_healthy():
+    provider = FailoverHTTPProvider(
+        [PRIMARY, BACKUP], max_rps=1000, failback_after_sec=5.0
+    )
+    calls: list[str] = []
+
+    def fake_make_request(self, method, params):
+        calls.append(self.endpoint_uri)
+        if self.endpoint_uri == PRIMARY and len(calls) == 1:
+            raise Exception("429 Too Many Requests")
+        return {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+
+    with patch(
+        "web3.providers.rpc.HTTPProvider.make_request", new=fake_make_request
+    ):
+        provider.make_request("eth_blockNumber", [])
+        assert provider.active_endpoint == BACKUP
+        # Pretend we've been on the backup long enough.
+        provider._left_primary_at = 0.0
+        assert provider.maybe_failback() is True
+
+    assert provider.active_endpoint == PRIMARY
+    assert provider.failback_count == 1
+    assert provider.last_switch_kind == "failback"
+
+
+def test_failback_stays_on_backup_while_primary_is_full():
+    provider = FailoverHTTPProvider(
+        [PRIMARY, BACKUP], max_rps=1000, failback_after_sec=5.0
+    )
+    provider._index = 1
+    provider._left_primary_at = 0.0
+
+    def fake_make_request(self, method, params):
+        if self.endpoint_uri == PRIMARY:
+            raise Exception("429 Too Many Requests")
+        return {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+
+    with patch(
+        "web3.providers.rpc.HTTPProvider.make_request", new=fake_make_request
+    ):
+        assert provider.maybe_failback() is False
+
+    assert provider.active_endpoint == BACKUP
+    assert provider.failback_count == 0
+
+
 def test_retries_429_on_single_endpoint():
     provider = FailoverHTTPProvider([PRIMARY], max_rps=1000)
     calls = {"n": 0}

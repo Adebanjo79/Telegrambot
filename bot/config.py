@@ -74,6 +74,7 @@ class Settings:
     rpc_warn_percent: float
     rpc_slow_ms: float
     rpc_load_balance: bool
+    rpc_failback_sec: float
 
     @classmethod
     def load(cls, env_file: str | None = ".env") -> "Settings":
@@ -156,4 +157,6 @@ class Settings:
             # true = spread requests across every RPC_URLS entry instead of
             # keeping the extras purely as backups.
             rpc_load_balance=_parse_bool(_opt("RPC_LOAD_BALANCE", "true"), True),
+            # After this many seconds on a backup, probe the primary and return.
+            rpc_failback_sec=float(_opt("RPC_FAILBACK_SEC", "30")),
         )

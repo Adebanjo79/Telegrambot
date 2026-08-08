@@ -29,12 +29,14 @@ def build_web3(
     rpc_urls: tuple[str, ...] | list[str],
     load_balance: bool = False,
     max_rps: float = 20.0,
+    failback_after_sec: float = 30.0,
 ) -> Web3:
     # Leave ~20% headroom under the plan cap so mint bursts don't 429.
     provider = FailoverHTTPProvider(
         list(rpc_urls),
         load_balance=load_balance,
         max_rps=max(1.0, max_rps * 0.8),
+        failback_after_sec=failback_after_sec,
         request_kwargs={"timeout": 45},
     )
     w3 = Web3(provider)
@@ -115,26 +117,54 @@ async def watch_loop(
     last_blip_alert = 0.0
     rpc_was_full = False
     provider = getattr(watcher.w3, "provider", None)
-    seen_failovers = getattr(provider, "failover_count", 0)
+    seen_switches = getattr(provider, "switch_count", 0)
     last_load_check = 0.0
     last_load_alert = 0.0
+    last_failback_check = 0.0
     load_warned = False
     while True:
         try:
-            # A silent failover still means a node hit its limit — report it.
-            failovers = getattr(provider, "failover_count", 0)
-            if failovers > seen_failovers:
-                seen_failovers = failovers
+            # Report both failover (to backup) and failback (to primary).
+            switches = getattr(provider, "switch_count", 0)
+            if switches > seen_switches:
+                seen_switches = switches
+                kind = getattr(provider, "last_switch_kind", "failover")
                 try:
-                    await tracker.notify(
-                        "🔁 Switched RPC node (previous one was full/failing)\n"
-                        f"Now using: {provider.active_endpoint}\n"
-                        f"Reason: {provider.last_failover_reason}"
-                    )
+                    if kind == "failback":
+                        await tracker.notify(
+                            "↩️ Back on primary RPC (Chainstack)\n"
+                            f"Now using: {provider.active_endpoint}\n"
+                            "Backup Alchemy is idle again."
+                        )
+                    else:
+                        await tracker.notify(
+                            "🔁 Switched to backup RPC\n"
+                            f"Now using: {provider.active_endpoint}\n"
+                            f"Reason: {provider.last_failover_reason}\n"
+                            "Will return to Chainstack automatically when it recovers."
+                        )
                 except Exception:
                     pass
 
             now = asyncio.get_running_loop().time()
+            if provider is not None and now - last_failback_check >= 15:
+                last_failback_check = now
+                try:
+                    did_failback = await asyncio.to_thread(provider.maybe_failback)
+                except Exception:
+                    log.exception("RPC failback probe failed")
+                    did_failback = False
+                if did_failback:
+                    seen_switches = getattr(provider, "switch_count", seen_switches)
+                    try:
+                        await tracker.notify(
+                            "↩️ Back on primary RPC (Chainstack)\n"
+                            f"Now using: {provider.active_endpoint}\n"
+                            "Backup Alchemy is idle again."
+                        )
+                    except Exception:
+                        pass
+
             if provider is not None and now - last_load_check >= 10:
                 last_load_check = now
                 load_warned, last_load_alert = await check_rpc_load(
@@ -270,6 +300,7 @@ async def async_main() -> int:
         settings.rpc_urls,
         settings.rpc_load_balance,
         settings.rpc_rate_limit,
+        settings.rpc_failback_sec,
     )
     chain_id = w3.eth.chain_id
     if chain_id != settings.chain_id:

@@ -23,12 +23,12 @@ class FailoverHTTPProvider(HTTPProvider):
     """
     HTTP provider that spreads work across several RPC endpoints.
 
-    Failover mode (default): use one endpoint until it is rate-limited/full or
-    unreachable, then move to the next.
+    Failover mode (default): use the primary endpoint until it is rate-limited
+    or unreachable, then move to the next. After a short calm period the bot
+    probes the primary again and returns to it automatically (failback).
 
-    Load-balance mode: send each request to the next endpoint in turn, so two
-    providers (e.g. Chainstack + Alchemy) share the traffic and each stays
-    below its own per-second cap. Failover still applies per request.
+    Load-balance mode: send each request to the next endpoint in turn. Failover
+    still applies per request; failback is skipped because every node is active.
 
     A local rate limiter keeps bursts (e.g. 15 wallets minting at once) under
     the plan's requests/second cap, and 429s are retried with backoff.
@@ -40,6 +40,7 @@ class FailoverHTTPProvider(HTTPProvider):
         *,
         load_balance: bool = False,
         max_rps: float = 20.0,
+        failback_after_sec: float = 30.0,
         **kwargs: Any,
     ) -> None:
         if not endpoints:
@@ -47,13 +48,18 @@ class FailoverHTTPProvider(HTTPProvider):
         self.endpoints = list(endpoints)
         self.load_balance = load_balance and len(self.endpoints) > 1
         self.max_rps = max(1.0, float(max_rps))
+        self.failback_after_sec = max(5.0, float(failback_after_sec))
         self._index = 0
         self.last_failover_reason = ""
+        self.last_switch_kind = ""
         self.failover_count = 0
+        self.failback_count = 0
+        self._left_primary_at = 0.0
         # Mint copies run in threads, so all shared counters need a lock.
         self._samples: deque[tuple[float, float]] = deque(maxlen=4000)
         self._samples_lock = threading.Lock()
         self._pace_lock = threading.Lock()
+        self._switch_lock = threading.Lock()
         self._next_slot = 0.0
         self._round_robin = itertools.count()
         self.endpoint_requests: dict[str, int] = {u: 0 for u in self.endpoints}
@@ -67,6 +73,14 @@ class FailoverHTTPProvider(HTTPProvider):
     @property
     def active_endpoint(self) -> str:
         return self.endpoints[self._index]
+
+    @property
+    def on_primary(self) -> bool:
+        return self._index == 0
+
+    @property
+    def switch_count(self) -> int:
+        return self.failover_count + self.failback_count
 
     def _pace(self) -> None:
         """Space requests so bursts stay under max_rps."""
@@ -82,17 +96,61 @@ class FailoverHTTPProvider(HTTPProvider):
     def _rotate(self, reason: str) -> None:
         if len(self.endpoints) < 2:
             return
-        previous = self.active_endpoint
-        self._index = (self._index + 1) % len(self.endpoints)
-        self.endpoint_uri = self.active_endpoint
-        self.last_failover_reason = reason
-        self.failover_count += 1
-        log.warning(
-            "Switching RPC endpoint %s -> %s (%s)",
-            previous,
-            self.active_endpoint,
-            reason,
-        )
+        with self._switch_lock:
+            previous = self.active_endpoint
+            self._index = (self._index + 1) % len(self.endpoints)
+            self.endpoint_uri = self.active_endpoint
+            self.last_failover_reason = reason
+            self.last_switch_kind = "failover"
+            self.failover_count += 1
+            if self._index != 0:
+                self._left_primary_at = time.monotonic()
+            log.warning(
+                "Switching RPC endpoint %s -> %s (%s)",
+                previous,
+                self.active_endpoint,
+                reason,
+            )
+
+    def maybe_failback(self) -> bool:
+        """
+        If we are on a backup, probe the primary and return to it when healthy.
+
+        Returns True when a failback happened.
+        """
+        if self.load_balance or len(self.endpoints) < 2 or self.on_primary:
+            return False
+        if time.monotonic() - self._left_primary_at < self.failback_after_sec:
+            return False
+
+        primary = self.endpoints[0]
+        try:
+            self._pace()
+            started = time.monotonic()
+            response = self._children[0].make_request("eth_blockNumber", [])
+            self._record(started, primary)
+        except Exception as exc:  # noqa: BLE001 - stay on backup
+            log.info("Primary still unhealthy, staying on backup: %s", exc)
+            self._left_primary_at = time.monotonic()
+            return False
+
+        capacity_error = self._response_capacity_error(response)
+        if capacity_error:
+            log.info("Primary still rate-limited, staying on backup: %s", capacity_error)
+            self._left_primary_at = time.monotonic()
+            return False
+
+        with self._switch_lock:
+            if self.on_primary:
+                return False
+            previous = self.active_endpoint
+            self._index = 0
+            self.endpoint_uri = primary
+            self.last_failover_reason = "primary recovered"
+            self.last_switch_kind = "failback"
+            self.failback_count += 1
+            log.info("Failing back to primary RPC %s (was %s)", primary, previous)
+        return True
 
     @staticmethod
     def _response_capacity_error(response: RPCResponse) -> str:
