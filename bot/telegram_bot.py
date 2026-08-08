@@ -97,15 +97,24 @@ class TelegramTracker:
         mode = "DRY_RUN" if self.settings.dry_run else "LIVE"
         provider = getattr(self.mint_copy.w3, "provider", None)
         active_rpc = getattr(provider, "active_endpoint", self.settings.rpc_url)
+        balancing = bool(getattr(provider, "load_balance", False))
+        node_count = len(self.settings.rpc_urls)
         rpc_line = f"RPC health: {self.rpc_health}"
-        if len(self.settings.rpc_urls) > 1:
-            rpc_line += f" (failover across {len(self.settings.rpc_urls)} nodes)"
-        limit = self.settings.rpc_rate_limit
+        if node_count > 1:
+            mode = "sharing load across" if balancing else "failover across"
+            rpc_line += f" ({mode} {node_count} nodes)"
+        limit = self.settings.rpc_rate_limit * (node_count if balancing else 1)
         used_pct = (self.rpc_per_sec / limit * 100.0) if limit > 0 else 0.0
         rpc_line += (
             f"\nRPC load: {self.rpc_per_sec:.1f}/{limit:.0f} req/s "
             f"({used_pct:.0f}% of plan), {self.rpc_avg_ms:.0f} ms avg"
         )
+        counts = getattr(provider, "endpoint_requests", None)
+        if counts and node_count > 1:
+            split = ", ".join(
+                f"{url.split('/')[2].split('.')[0]}: {n}" for url, n in counts.items()
+            )
+            rpc_line += f"\nRequests per node: {split}"
         if self.rpc_last_error:
             rpc_line += f"\nRPC last error: {self.rpc_last_error}"
         await update.message.reply_text(

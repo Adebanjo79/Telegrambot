@@ -25,9 +25,10 @@ class FakeTracker:
         self.sent.append(text)
 
 
-def _provider_with(count: int, duration: float) -> FailoverHTTPProvider:
-    provider = FailoverHTTPProvider([ENDPOINT])
-    now = 0.0
+def _provider_with(
+    count: int, duration: float, endpoints: list[str] | None = None, **kwargs
+) -> FailoverHTTPProvider:
+    provider = FailoverHTTPProvider(endpoints or [ENDPOINT], **kwargs)
     # load_stats() uses a 10s window off time.monotonic(); seed recent samples.
     import time
 
@@ -76,6 +77,22 @@ def test_quiet_when_healthy_and_reports_recovery():
     assert len(tracker.sent) == 1
     assert "back to normal" in tracker.sent[0]
     assert tracker.rpc_health == "OK"
+
+
+def test_load_balancing_raises_the_effective_cap():
+    tracker = FakeTracker()
+    # 21/s would warn on one node, but two balanced nodes allow 50/s.
+    provider = _provider_with(
+        210,
+        0.05,
+        endpoints=[ENDPOINT, "https://node-2.example.com/key"],
+        load_balance=True,
+    )
+
+    warned, _ = asyncio.run(check_rpc_load(tracker, provider, 100.0, False, 0.0))
+
+    assert warned is False
+    assert tracker.sent == []
 
 
 def test_repeat_warnings_are_throttled():

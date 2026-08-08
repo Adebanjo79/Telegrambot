@@ -25,8 +25,14 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 
-def build_web3(rpc_urls: tuple[str, ...] | list[str]) -> Web3:
-    provider = FailoverHTTPProvider(list(rpc_urls), request_kwargs={"timeout": 45})
+def build_web3(
+    rpc_urls: tuple[str, ...] | list[str], load_balance: bool = False
+) -> Web3:
+    provider = FailoverHTTPProvider(
+        list(rpc_urls),
+        load_balance=load_balance,
+        request_kwargs={"timeout": 45},
+    )
     w3 = Web3(provider)
     if not w3.is_connected():
         raise RuntimeError(f"Cannot connect to any RPC: {', '.join(rpc_urls)}")
@@ -52,7 +58,9 @@ async def check_rpc_load(
     tracker.rpc_per_sec = per_sec
     tracker.rpc_avg_ms = avg_ms
 
-    limit = settings.rpc_rate_limit
+    # Load balancing spreads requests, so the usable cap is per-node × nodes.
+    nodes = len(provider.endpoints) if provider.load_balance else 1
+    limit = settings.rpc_rate_limit * nodes
     threshold = limit * (settings.rpc_warn_percent / 100.0)
     used_pct = (per_sec / limit * 100.0) if limit > 0 else 0.0
 
@@ -254,7 +262,7 @@ async def async_main() -> int:
         print("Copy .env.example to .env and fill in the values.", file=sys.stderr)
         return 1
 
-    w3 = build_web3(settings.rpc_urls)
+    w3 = build_web3(settings.rpc_urls, settings.rpc_load_balance)
     chain_id = w3.eth.chain_id
     if chain_id != settings.chain_id:
         log.warning(

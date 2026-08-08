@@ -78,6 +78,7 @@ python main.py
 | `TELEGRAM_OWNER_ID` | Only this Telegram user can control the bot |
 | `RPC_URL` | Default public RPC (rate-limited). Prefer Chainstack/Alchemy/QuickNode for stability |
 | `RPC_URLS` | Optional comma-separated endpoints; the bot fails over automatically when a node is full |
+| `RPC_LOAD_BALANCE` | `true` = share traffic across all endpoints; `false` = extras are backups only |
 | `CHAIN_ID` | `4663` (Robinhood Chain mainnet) |
 | `EXPLORER_URL` | Default `https://robinhoodchain.blockscout.com` |
 | `TARGET_WALLETS` | Comma-separated wallets to copy |
@@ -102,6 +103,20 @@ The bot watches its own request rate and latency, and messages you on Telegram:
 | `✅ RPC back to normal` / `✅ RPC recovered` | Load or errors cleared |
 
 Warnings repeat at most every 3 minutes while a problem lasts.
+
+### Using two providers together
+
+Alchemy supports Robinhood Chain (`https://robinhood-mainnet.g.alchemy.com/v2/KEY`),
+so it pairs well with Chainstack:
+
+```dotenv
+RPC_URLS=https://robinhood-mainnet.core.chainstack.com/KEY,https://robinhood-mainnet.g.alchemy.com/v2/KEY
+RPC_LOAD_BALANCE=true
+```
+
+With balancing on, each node handles about half the requests, so the warning
+threshold scales with the number of nodes. If one provider is rate-limited or
+goes down, the request is retried on the other one immediately.
 
 ## Telegram commands
 

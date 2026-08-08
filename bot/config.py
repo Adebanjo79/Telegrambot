@@ -73,6 +73,7 @@ class Settings:
     rpc_rate_limit: float
     rpc_warn_percent: float
     rpc_slow_ms: float
+    rpc_load_balance: bool
 
     @classmethod
     def load(cls, env_file: str | None = ".env") -> "Settings":
@@ -152,4 +153,7 @@ class Settings:
             rpc_rate_limit=float(_opt("RPC_RATE_LIMIT", "25")),
             rpc_warn_percent=float(_opt("RPC_WARN_PERCENT", "80")),
             rpc_slow_ms=float(_opt("RPC_SLOW_MS", "1500")),
+            # true = spread requests across every RPC_URLS entry instead of
+            # keeping the extras purely as backups.
+            rpc_load_balance=_parse_bool(_opt("RPC_LOAD_BALANCE", "true"), True),
         )

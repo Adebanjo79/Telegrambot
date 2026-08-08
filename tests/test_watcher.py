@@ -42,6 +42,7 @@ def _settings(**overrides) -> Settings:
         rpc_rate_limit=25.0,
         rpc_warn_percent=80.0,
         rpc_slow_ms=1500.0,
+        rpc_load_balance=False,
     )
     base.update(overrides)
     return Settings(**base)
