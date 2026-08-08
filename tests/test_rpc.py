@@ -1,10 +1,30 @@
-from bot.rpc import is_transient_rpc_error, rpc_call
+from bot.rpc import (
+    is_rpc_capacity_error,
+    is_transient_rpc_error,
+    rpc_call,
+    rpc_capacity_message,
+)
 
 
 def test_is_transient_rpc_error():
     assert is_transient_rpc_error(ConnectionError("Remote end closed connection without response"))
     assert is_transient_rpc_error(TimeoutError("timed out"))
     assert not is_transient_rpc_error(ValueError("bad private key"))
+
+
+def test_is_rpc_capacity_error():
+    assert is_rpc_capacity_error(Exception("429 Too Many Requests"))
+    assert is_rpc_capacity_error(Exception("compute units exceeded"))
+    assert is_rpc_capacity_error(Exception("Monthly quota exceeded"))
+    assert is_rpc_capacity_error(Exception("rate limit reached"))
+    assert not is_rpc_capacity_error(ConnectionError("Connection refused"))
+    assert not is_rpc_capacity_error(ValueError("bad private key"))
+
+
+def test_rpc_capacity_message_mentions_full():
+    msg = rpc_capacity_message(Exception("429 Too Many Requests"))
+    assert "RPC FULL" in msg
+    assert "429" in msg
 
 
 def test_rpc_call_retries_then_succeeds():

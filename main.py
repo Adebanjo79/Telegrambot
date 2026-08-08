@@ -8,7 +8,11 @@ from web3 import Web3
 
 from bot.config import Settings
 from bot.mint_copy import MintCopyService
-from bot.rpc import is_transient_rpc_error
+from bot.rpc import (
+    is_rpc_capacity_error,
+    is_transient_rpc_error,
+    rpc_capacity_message,
+)
 from bot.telegram_bot import TelegramTracker
 from bot.watcher import WalletWatcher
 
@@ -33,11 +37,23 @@ async def watch_loop(
     mint_copy: MintCopyService,
 ) -> None:
     settings = tracker.settings
-    last_rpc_alert = 0.0
+    last_capacity_alert = 0.0
+    last_blip_alert = 0.0
+    rpc_was_full = False
     while True:
         try:
             if watcher.enabled:
                 candidates = await asyncio.to_thread(watcher.poll)
+                if rpc_was_full:
+                    rpc_was_full = False
+                    tracker.rpc_health = "OK"
+                    tracker.rpc_last_error = ""
+                    try:
+                        await tracker.notify(
+                            "✅ RPC recovered — requests are working again."
+                        )
+                    except Exception:
+                        pass
                 for candidate in candidates:
                     if mint_copy.already_copied(candidate.source_tx_hash):
                         continue
@@ -99,16 +115,33 @@ async def watch_loop(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            now = asyncio.get_running_loop().time()
+            if is_rpc_capacity_error(exc):
+                log.warning("RPC FULL / rate-limited (will retry): %s", exc)
+                first_full = not rpc_was_full
+                rpc_was_full = True
+                tracker.rpc_health = "FULL"
+                tracker.rpc_last_error = str(exc)
+                # Always alert on first hit; remind every 60s while still full.
+                if first_full or now - last_capacity_alert >= 60:
+                    last_capacity_alert = now
+                    try:
+                        await tracker.notify(rpc_capacity_message(exc))
+                    except Exception:
+                        pass
+                await asyncio.sleep(max(settings.poll_interval_sec, 2.0))
+                continue
+
             if is_transient_rpc_error(exc):
                 log.warning("Transient RPC error (will retry): %s", exc)
-                now = asyncio.get_running_loop().time()
-                # Avoid spamming Telegram on public RPC disconnects.
-                if now - last_rpc_alert > 120:
-                    last_rpc_alert = now
+                tracker.rpc_health = "BLIP"
+                tracker.rpc_last_error = str(exc)
+                if now - last_blip_alert > 120:
+                    last_blip_alert = now
                     try:
                         await tracker.notify(
-                            "⚠️ RPC connection blip (retrying). "
-                            "Public RPC is rate-limited — prefer Alchemy/QuickNode in RPC_URL."
+                            "⚠️ RPC connection blip (retrying).\n"
+                            f"Detail: {exc}"
                         )
                     except Exception:
                         pass
@@ -116,6 +149,8 @@ async def watch_loop(
                 continue
 
             log.exception("Poll loop error")
+            tracker.rpc_health = "ERROR"
+            tracker.rpc_last_error = str(exc)
             try:
                 await tracker.notify(f"⚠️ Watcher error: {exc}")
             except Exception:

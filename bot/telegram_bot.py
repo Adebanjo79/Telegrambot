@@ -27,6 +27,8 @@ class TelegramTracker:
         self.settings = settings
         self.watcher = watcher
         self.mint_copy = mint_copy
+        self.rpc_health = "OK"
+        self.rpc_last_error = ""
         self.app = (
             Application.builder()
             .token(settings.telegram_bot_token)
@@ -91,11 +93,15 @@ class TelegramTracker:
             await update.message.reply_text("Unauthorized.")
             return
         mode = "DRY_RUN" if self.settings.dry_run else "LIVE"
+        rpc_line = f"RPC health: {self.rpc_health}"
+        if self.rpc_last_error:
+            rpc_line += f"\nRPC last error: {self.rpc_last_error}"
         await update.message.reply_text(
             f"Enabled: {self.watcher.enabled}\n"
             f"Mode: {mode}\n"
             f"Network: Robinhood Chain ({self.settings.chain_id})\n"
             f"RPC: {self.settings.rpc_url}\n"
+            f"{rpc_line}\n"
             f"Minting wallets: {len(self.mint_copy.my_wallets)} "
             f"({len(self.settings.private_keys)} .env + "
             f"{max(0, len(self.mint_copy.my_wallets) - len(self.settings.private_keys))} file)\n"

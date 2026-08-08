@@ -33,12 +33,60 @@ RETRY_HINTS = (
     "-32000",
 )
 
+# Provider quota / rate-limit / "RPC is full" signals.
+CAPACITY_HINTS = (
+    "429",
+    "too many requests",
+    "rate limit",
+    "ratelimit",
+    "rate-limit",
+    "throughput",
+    "compute unit",
+    "compute units",
+    "cu limit",
+    "cu exceeded",
+    "monthly quota",
+    "quota exceeded",
+    "quota limit",
+    "capacity",
+    "over capacity",
+    "limit exceeded",
+    "request limit",
+    "calls limit",
+    "payment required",
+    "402",
+    "out of credits",
+    "insufficient credits",
+    "credits exhausted",
+    "free tier",
+)
+
+
+def _error_blob(exc: BaseException) -> str:
+    return f"{type(exc).__name__} {exc}".lower()
+
+
+def is_rpc_capacity_error(exc: BaseException) -> bool:
+    """True when the RPC provider is rate-limited, over quota, or 'full'."""
+    blob = _error_blob(exc)
+    return any(hint in blob for hint in CAPACITY_HINTS)
+
 
 def is_transient_rpc_error(exc: BaseException) -> bool:
-    text = str(exc).lower()
-    name = type(exc).__name__.lower()
-    blob = f"{name} {text}"
+    blob = _error_blob(exc)
+    if is_rpc_capacity_error(exc):
+        return True
     return any(hint in blob for hint in RETRY_HINTS)
+
+
+def rpc_capacity_message(exc: BaseException) -> str:
+    return (
+        "🚨 RPC FULL / rate-limited\n"
+        "Your RPC provider is rejecting requests "
+        "(quota, compute units, or rate limit).\n"
+        "Bot is retrying, but mints may be missed until this clears.\n"
+        f"Detail: {exc}"
+    )
 
 
 def rpc_call(fn: Callable[[], T], *, retries: int = 4, base_delay: float = 0.75) -> T:
@@ -52,8 +100,10 @@ def rpc_call(fn: Callable[[], T], *, retries: int = 4, base_delay: float = 0.75)
             if not is_transient_rpc_error(exc) or attempt == retries - 1:
                 raise
             delay = base_delay * (2**attempt)
+            kind = "FULL/rate-limit" if is_rpc_capacity_error(exc) else "transient"
             log.warning(
-                "RPC transient error (attempt %s/%s): %s; retrying in %.1fs",
+                "RPC %s error (attempt %s/%s): %s; retrying in %.1fs",
+                kind,
                 attempt + 1,
                 retries,
                 exc,
