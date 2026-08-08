@@ -101,6 +101,25 @@ def test_load_balance_still_fails_over_when_one_node_is_full():
     assert provider.failover_count == 1
 
 
+def test_retries_429_on_single_endpoint():
+    provider = FailoverHTTPProvider([PRIMARY], max_rps=1000)
+    calls = {"n": 0}
+
+    def fake_make_request(self, method, params):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise Exception("429 Client Error: Too Many Requests for url: " + PRIMARY)
+        return {"jsonrpc": "2.0", "id": 1, "result": "0xabc"}
+
+    with patch(
+        "web3.providers.rpc.HTTPProvider.make_request", new=fake_make_request
+    ):
+        result = provider.make_request("eth_blockNumber", [])
+
+    assert result["result"] == "0xabc"
+    assert calls["n"] == 3
+
+
 def test_non_transient_error_is_raised_without_rotation():
     provider = FailoverHTTPProvider([PRIMARY, BACKUP])
 

@@ -26,11 +26,15 @@ log = logging.getLogger("main")
 
 
 def build_web3(
-    rpc_urls: tuple[str, ...] | list[str], load_balance: bool = False
+    rpc_urls: tuple[str, ...] | list[str],
+    load_balance: bool = False,
+    max_rps: float = 20.0,
 ) -> Web3:
+    # Leave ~20% headroom under the plan cap so mint bursts don't 429.
     provider = FailoverHTTPProvider(
         list(rpc_urls),
         load_balance=load_balance,
+        max_rps=max(1.0, max_rps * 0.8),
         request_kwargs={"timeout": 45},
     )
     w3 = Web3(provider)
@@ -262,7 +266,11 @@ async def async_main() -> int:
         print("Copy .env.example to .env and fill in the values.", file=sys.stderr)
         return 1
 
-    w3 = build_web3(settings.rpc_urls, settings.rpc_load_balance)
+    w3 = build_web3(
+        settings.rpc_urls,
+        settings.rpc_load_balance,
+        settings.rpc_rate_limit,
+    )
     chain_id = w3.eth.chain_id
     if chain_id != settings.chain_id:
         log.warning(

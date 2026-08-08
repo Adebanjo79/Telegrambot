@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
 from eth_account import Account
@@ -256,28 +257,54 @@ class MintCopyService:
         results: list[tuple[str, bool, str, str | None] | None] = [None] * len(
             accounts
         )
-        workers = min(len(accounts), 8)
+        # Keep concurrency modest; the provider also paces requests. Too many
+        # parallel wallets on a 25 req/s plan causes 429s mid-mint.
+        workers = min(len(accounts), 3)
+
+        def _run(account, i: int) -> None:
+            try:
+                ok, message, tx_hash = self._try_copy_with(account, candidate)
+            except Exception as exc:
+                log.exception("Wallet copy crashed for %s", account.address)
+                ok, message, tx_hash = False, f"Copy crashed: {exc}", None
+            results[i] = (account.address, ok, message, tx_hash)
+            log.info(
+                "Wallet %s/%s %s -> ok=%s",
+                i + 1,
+                len(accounts),
+                account.address,
+                ok,
+            )
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(self._try_copy_with, account, candidate): i
-                for i, account in enumerate(accounts)
-            }
-            for fut in as_completed(futures):
-                i = futures[fut]
-                account = accounts[i]
-                try:
-                    ok, message, tx_hash = fut.result()
-                except Exception as exc:
-                    log.exception("Wallet copy crashed for %s", account.address)
-                    ok, message, tx_hash = False, f"Copy crashed: {exc}", None
-                results[i] = (account.address, ok, message, tx_hash)
-                log.info(
-                    "Wallet %s/%s %s -> ok=%s",
-                    i + 1,
-                    len(accounts),
-                    account.address,
-                    ok,
+            list(
+                pool.map(
+                    lambda item: _run(item[1], item[0]),
+                    enumerate(accounts),
                 )
+            )
+
+        # Second pass for wallets that only failed because the RPC was full.
+        retry_idxs = [
+            i
+            for i, r in enumerate(results)
+            if r is not None and not r[1] and "429" in r[2].lower()
+        ]
+        if retry_idxs:
+            log.warning(
+                "Retrying %s wallet(s) after RPC 429 on mint %s",
+                len(retry_idxs),
+                candidate.source_tx_hash,
+            )
+            time.sleep(0.8)
+            with ThreadPoolExecutor(max_workers=min(2, len(retry_idxs))) as pool:
+                list(
+                    pool.map(
+                        lambda i: _run(accounts[i], i),
+                        retry_idxs,
+                    )
+                )
+
         return [r for r in results if r is not None]
 
     def try_copy(self, candidate: MintCandidate) -> tuple[bool, str, str | None]:

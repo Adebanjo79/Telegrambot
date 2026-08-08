@@ -29,6 +29,9 @@ class FailoverHTTPProvider(HTTPProvider):
     Load-balance mode: send each request to the next endpoint in turn, so two
     providers (e.g. Chainstack + Alchemy) share the traffic and each stays
     below its own per-second cap. Failover still applies per request.
+
+    A local rate limiter keeps bursts (e.g. 15 wallets minting at once) under
+    the plan's requests/second cap, and 429s are retried with backoff.
     """
 
     def __init__(
@@ -36,18 +39,22 @@ class FailoverHTTPProvider(HTTPProvider):
         endpoints: list[str],
         *,
         load_balance: bool = False,
+        max_rps: float = 20.0,
         **kwargs: Any,
     ) -> None:
         if not endpoints:
             raise ValueError("At least one RPC endpoint is required")
         self.endpoints = list(endpoints)
         self.load_balance = load_balance and len(self.endpoints) > 1
+        self.max_rps = max(1.0, float(max_rps))
         self._index = 0
         self.last_failover_reason = ""
         self.failover_count = 0
         # Mint copies run in threads, so all shared counters need a lock.
         self._samples: deque[tuple[float, float]] = deque(maxlen=4000)
         self._samples_lock = threading.Lock()
+        self._pace_lock = threading.Lock()
+        self._next_slot = 0.0
         self._round_robin = itertools.count()
         self.endpoint_requests: dict[str, int] = {u: 0 for u in self.endpoints}
         # web3's own retry loop would delay switching nodes; we handle it here.
@@ -60,6 +67,17 @@ class FailoverHTTPProvider(HTTPProvider):
     @property
     def active_endpoint(self) -> str:
         return self.endpoints[self._index]
+
+    def _pace(self) -> None:
+        """Space requests so bursts stay under max_rps."""
+        gap = 1.0 / self.max_rps
+        with self._pace_lock:
+            now = time.monotonic()
+            start = max(now, self._next_slot)
+            self._next_slot = start + gap
+        delay = start - now
+        if delay > 0:
+            time.sleep(delay)
 
     def _rotate(self, reason: str) -> None:
         if len(self.endpoints) < 2:
@@ -119,32 +137,43 @@ class FailoverHTTPProvider(HTTPProvider):
 
     def make_request(self, method: RPCEndpoint, params: Any) -> RPCResponse:
         last_exc: BaseException | None = None
-        start = self._start_index()
-        for offset in range(len(self.endpoints)):
-            index = (start + offset) % len(self.endpoints)
-            endpoint = self.endpoints[index]
-            started = time.monotonic()
-            try:
-                response = self._children[index].make_request(method, params)
-            except Exception as exc:  # noqa: BLE001 - rotate then re-raise
-                self._record(started, endpoint)
-                last_exc = exc
-                if not (
-                    is_rpc_capacity_error(exc)
-                    or is_endpoint_down_error(exc)
-                    or is_transient_rpc_error(exc)
-                ):
+        # Outer loop retries capacity errors with backoff; inner loop rotates
+        # across endpoints when more than one is configured.
+        for attempt in range(4):
+            start = self._start_index()
+            for offset in range(len(self.endpoints)):
+                index = (start + offset) % len(self.endpoints)
+                endpoint = self.endpoints[index]
+                self._pace()
+                started = time.monotonic()
+                try:
+                    response = self._children[index].make_request(method, params)
+                except Exception as exc:  # noqa: BLE001 - rotate/retry
+                    self._record(started, endpoint)
+                    last_exc = exc
+                    if is_rpc_capacity_error(exc):
+                        self._rotate(str(exc))
+                        # If we have only one node, back off then retry.
+                        if len(self.endpoints) == 1:
+                            time.sleep(0.35 * (attempt + 1))
+                        break
+                    if is_endpoint_down_error(exc) or is_transient_rpc_error(exc):
+                        self._rotate(str(exc))
+                        continue
                     raise
-                self._rotate(str(exc))
-                continue
 
-            self._record(started, endpoint)
-            capacity_error = self._response_capacity_error(response)
-            if capacity_error:
-                last_exc = Exception(capacity_error)
-                self._rotate(capacity_error)
-                continue
-            return response
+                self._record(started, endpoint)
+                capacity_error = self._response_capacity_error(response)
+                if capacity_error:
+                    last_exc = Exception(capacity_error)
+                    self._rotate(capacity_error)
+                    if len(self.endpoints) == 1:
+                        time.sleep(0.35 * (attempt + 1))
+                    break
+                return response
+            else:
+                # Tried every endpoint without a capacity-retry break.
+                break
 
         assert last_exc is not None
         raise last_exc
