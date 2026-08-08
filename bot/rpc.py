@@ -31,6 +31,18 @@ RETRY_HINTS = (
     "block with id",
     "header not found",
     "-32000",
+    # DNS / socket / TLS failures reaching the node
+    "max retries exceeded",
+    "failed to resolve",
+    "name or service not known",
+    "nameresolutionerror",
+    "connectionerror",
+    "newconnectionerror",
+    "connection error",
+    "ssl",
+    "bad gateway",
+    "gateway timeout",
+    "service unavailable",
 )
 
 # Provider quota / rate-limit / "RPC is full" signals.

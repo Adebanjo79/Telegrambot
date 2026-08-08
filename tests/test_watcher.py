@@ -26,6 +26,7 @@ def _settings(**overrides) -> Settings:
         telegram_bot_token="x",
         telegram_owner_id=1,
         rpc_url="https://rpc.mainnet.chain.robinhood.com",
+        rpc_urls=("https://rpc.mainnet.chain.robinhood.com",),
         chain_id=4663,
         explorer_url="https://robinhoodchain.blockscout.com",
         target_wallets=(Web3.to_checksum_address("0x" + "11" * 20),),

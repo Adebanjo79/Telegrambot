@@ -93,14 +93,18 @@ class TelegramTracker:
             await update.message.reply_text("Unauthorized.")
             return
         mode = "DRY_RUN" if self.settings.dry_run else "LIVE"
+        provider = getattr(self.mint_copy.w3, "provider", None)
+        active_rpc = getattr(provider, "active_endpoint", self.settings.rpc_url)
         rpc_line = f"RPC health: {self.rpc_health}"
+        if len(self.settings.rpc_urls) > 1:
+            rpc_line += f" (failover across {len(self.settings.rpc_urls)} nodes)"
         if self.rpc_last_error:
             rpc_line += f"\nRPC last error: {self.rpc_last_error}"
         await update.message.reply_text(
             f"Enabled: {self.watcher.enabled}\n"
             f"Mode: {mode}\n"
             f"Network: Robinhood Chain ({self.settings.chain_id})\n"
-            f"RPC: {self.settings.rpc_url}\n"
+            f"RPC: {active_rpc}\n"
             f"{rpc_line}\n"
             f"Minting wallets: {len(self.mint_copy.my_wallets)} "
             f"({len(self.settings.private_keys)} .env + "

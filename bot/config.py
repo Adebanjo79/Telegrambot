@@ -57,6 +57,7 @@ class Settings:
     telegram_bot_token: str
     telegram_owner_id: int
     rpc_url: str
+    rpc_urls: tuple[str, ...]
     chain_id: int
     explorer_url: str
     target_wallets: tuple[str, ...]
@@ -113,10 +114,23 @@ class Settings:
                 "TELEGRAM_OWNER_ID must be your numeric Telegram user id from @userinfobot"
             ) from exc
 
+        # RPC_URLS=primary,backup enables automatic failover between nodes.
+        rpc_urls = tuple(
+            url.strip()
+            for url in _opt(
+                "RPC_URLS",
+                _opt("RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
+            ).split(",")
+            if url.strip()
+        )
+        if not rpc_urls:
+            raise ValueError("RPC_URL/RPC_URLS must contain at least one endpoint")
+
         return cls(
             telegram_bot_token=_req("TELEGRAM_BOT_TOKEN"),
             telegram_owner_id=owner_id,
-            rpc_url=_opt("RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
+            rpc_url=rpc_urls[0],
+            rpc_urls=rpc_urls,
             chain_id=int(_opt("CHAIN_ID", "4663")),
             explorer_url=_opt("EXPLORER_URL", "https://robinhoodchain.blockscout.com").rstrip(
                 "/"

@@ -8,6 +8,7 @@ from web3 import Web3
 
 from bot.config import Settings
 from bot.mint_copy import MintCopyService
+from bot.provider import FailoverHTTPProvider
 from bot.rpc import (
     is_rpc_capacity_error,
     is_transient_rpc_error,
@@ -24,10 +25,11 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 
-def build_web3(rpc_url: str) -> Web3:
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 45}))
+def build_web3(rpc_urls: tuple[str, ...] | list[str]) -> Web3:
+    provider = FailoverHTTPProvider(list(rpc_urls), request_kwargs={"timeout": 45})
+    w3 = Web3(provider)
     if not w3.is_connected():
-        raise RuntimeError(f"Cannot connect to RPC: {rpc_url}")
+        raise RuntimeError(f"Cannot connect to any RPC: {', '.join(rpc_urls)}")
     return w3
 
 
@@ -167,7 +169,7 @@ async def async_main() -> int:
         print("Copy .env.example to .env and fill in the values.", file=sys.stderr)
         return 1
 
-    w3 = build_web3(settings.rpc_url)
+    w3 = build_web3(settings.rpc_urls)
     chain_id = w3.eth.chain_id
     if chain_id != settings.chain_id:
         log.warning(
@@ -205,6 +207,8 @@ async def async_main() -> int:
             f"Minting wallets: {total_n} "
             f"({env_n} from .env, {file_n} from mint_wallets.json)\n"
             f"Primary wallet: {mint_copy.my_wallet}\n"
+            f"RPC endpoints: {len(settings.rpc_urls)}"
+            f"{' (auto failover)' if len(settings.rpc_urls) > 1 else ''}\n"
             f"Free mints only: {settings.free_mints_only}\n"
             f"Starting at block {head}"
         )

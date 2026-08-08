@@ -76,7 +76,8 @@ python main.py
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | From BotFather |
 | `TELEGRAM_OWNER_ID` | Only this Telegram user can control the bot |
-| `RPC_URL` | Default public RPC (rate-limited). Prefer Alchemy/QuickNode for stability |
+| `RPC_URL` | Default public RPC (rate-limited). Prefer Chainstack/Alchemy/QuickNode for stability |
+| `RPC_URLS` | Optional comma-separated endpoints; the bot fails over automatically when a node is full |
 | `CHAIN_ID` | `4663` (Robinhood Chain mainnet) |
 | `EXPLORER_URL` | Default `https://robinhoodchain.blockscout.com` |
 | `TARGET_WALLETS` | Comma-separated wallets to copy |
@@ -89,7 +90,7 @@ python main.py
 ## Telegram commands
 
 - `/start` `/help` — help
-- `/status` — watcher state, mode, last block
+- `/status` — watcher state, mode, last block, RPC health
 - `/targets` — wallets being watched
 - `/pause` / `/resume` — stop / start copying
 - `/balance` — your ETH on Robinhood Chain
