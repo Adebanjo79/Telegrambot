@@ -1,4 +1,11 @@
-from bot.mint_copy import SEADROP, SEADROP_MINT_PUBLIC, rewrite_calldata_for_my_wallet
+from bot.mint_copy import (
+    SEADROP,
+    SEADROP_MINT_PUBLIC,
+    normalize_seadrop_mint_public,
+    rewrite_calldata_for_my_wallet,
+    seadrop_mint_public_quantity,
+    with_seadrop_mint_public_quantity,
+)
 
 
 def test_seadrop_mint_public_rewrites_minter_to_zero():
@@ -20,6 +27,25 @@ def test_seadrop_mint_public_rewrites_minter_to_zero():
     # quantity unchanged
     assert body[64 * 3 :] == "0" * 63 + "5"
     assert "SeaDrop" in note
+
+
+def test_seadrop_strips_trailing_junk_and_qty_retry_stays_valid():
+    target = "0xA0c9EA7Dcd2a50FC7aD758B96356e99f04b9861d"
+    mine = "0x545C60Ee00fE80E2d00C9Ef7E682A68F2F94D4A5"
+    raw = (
+        SEADROP_MINT_PUBLIC
+        + "000000000000000000000000b68ea16af1356d88395242502d95bc097b9f517c"
+        + "0000000000000000000000000000a26b00c1f0df003000390027140000faa719"
+        + "000000000000000000000000a0c9ea7dcd2a50fc7ad758b96356e99f04b9861d"
+        + "0000000000000000000000000000000000000000000000000000000000000003"
+        + "3d958fe2"  # trailing junk seen on Robinhood txs
+    )
+    out, _ = rewrite_calldata_for_my_wallet(raw, target, mine, SEADROP)
+    assert out == normalize_seadrop_mint_public(out)
+    assert seadrop_mint_public_quantity(out) == 3
+    qty1 = with_seadrop_mint_public_quantity(out, 1)
+    assert seadrop_mint_public_quantity(qty1) == 1
+    assert len(qty1) == 10 + 64 * 4
 
 
 def test_generic_address_rewrite():

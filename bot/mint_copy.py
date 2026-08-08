@@ -31,11 +31,56 @@ KNOWN_ERRORS = {
     "0xd855c4f4": "InvalidSignature (signed/allowlist mint for another wallet)",
     "0x7f023c72": "InvalidAuthSignature (auth-signed mint; not copyable)",
     "0xedc01273": "MintQuantityExceedsMaxMintedPerWallet (you already hit this drop's wallet limit)",
+    "0x198441cb": "MintQuantityCannotBeZero",
+    "0x0d35e921": "IncorrectPayment (this SeaDrop mint requires ETH — not a free mint)",
+    "0xf477d26f": "FeeRecipientNotAllowed",
+    "0x13da22f2": "NotActive (public drop window closed or not started)",
 }
 
 
 def _addr_word(address: str) -> str:
     return address.lower().removeprefix("0x").rjust(64, "0")
+
+
+def _ensure_hex(data: str) -> str:
+    text = data.lower()
+    if not text.startswith("0x"):
+        text = "0x" + text
+    return text
+
+
+def normalize_seadrop_mint_public(data: str) -> str:
+    """
+    Keep only selector + 4 ABI words.
+
+    Some wallets append trailing junk after mintPublic; that breaks naive
+    quantity retries (data[:-64]) and can report MintQuantityCannotBeZero.
+    """
+    data = _ensure_hex(data)
+    need = 10 + 64 * 4
+    if len(data) < need:
+        return data
+    return data[:need]
+
+
+def seadrop_mint_public_quantity(data: str) -> int:
+    data = normalize_seadrop_mint_public(data)
+    if len(data) < 10 + 64 * 4:
+        return 0
+    return int(data[10 + 64 * 3 : 10 + 64 * 4], 16)
+
+
+def seadrop_mint_public_nft(data: str) -> str:
+    data = normalize_seadrop_mint_public(data)
+    if len(data) < 10 + 64:
+        return ""
+    return Web3.to_checksum_address("0x" + data[10 + 24 : 10 + 64])
+
+
+def with_seadrop_mint_public_quantity(data: str, quantity: int) -> str:
+    data = normalize_seadrop_mint_public(data)
+    qty_word = format(int(quantity), "x").rjust(64, "0")
+    return data[: 10 + 64 * 3] + qty_word
 
 
 def rewrite_calldata_for_my_wallet(
@@ -50,9 +95,7 @@ def rewrite_calldata_for_my_wallet(
     - SeaDrop mintPublic: set minterIfNotPayer to address(0) (payer = minter)
     - Otherwise: replace padded target address words with our address
     """
-    data = input_data.lower()
-    if not data.startswith("0x"):
-        data = "0x" + data
+    data = _ensure_hex(input_data)
 
     note = "raw replay"
     selector = data[:10]
@@ -60,10 +103,10 @@ def rewrite_calldata_for_my_wallet(
 
     # SeaDrop public mint: third address arg is minterIfNotPayer.
     if contract == SEADROP and selector == SEADROP_MINT_PUBLIC and len(data) >= 10 + 64 * 4:
-        body = data[10:]
+        body = normalize_seadrop_mint_public(data)[10:]
         # args: nftContract, feeRecipient, minterIfNotPayer, quantity
         zero_word = "0" * 64
-        new_body = body[: 64 * 2] + zero_word + body[64 * 3 :]
+        new_body = body[: 64 * 2] + zero_word + body[64 * 3 : 64 * 4]
         note = "SeaDrop mintPublic → minterIfNotPayer=0x0 (you receive the NFT)"
         return "0x" + selector[2:] + new_body, note
 
@@ -86,8 +129,23 @@ def rewrite_calldata_for_my_wallet(
 
 def friendly_revert(exc: BaseException) -> str:
     text = str(exc)
+    lower = text.lower()
     for selector, meaning in KNOWN_ERRORS.items():
-        if selector in text.lower():
+        if selector in lower:
+            # IncorrectPayment(got, want) — decode want when present.
+            if selector == "0x0d35e921" and selector in lower:
+                try:
+                    hexdata = lower[lower.index(selector) :]
+                    hexdata = "".join(c for c in hexdata if c in "0123456789abcdef")
+                    if len(hexdata) >= 8 + 128:
+                        want = int(hexdata[8 + 64 : 8 + 128], 16)
+                        want_eth = Web3.from_wei(want, "ether")
+                        return (
+                            f"IncorrectPayment (needs {want_eth} ETH for this mint) "
+                            f"[{selector}]"
+                        )
+                except Exception:
+                    pass
             return f"{meaning} [{selector}]"
     return text
 
@@ -223,10 +281,63 @@ class MintCopyService:
         return [r for r in results if r is not None]
 
     def try_copy(self, candidate: MintCandidate) -> tuple[bool, str, str | None]:
-        """Backward-compatible single-wallet copy (first minting wallet). """
+        """ Backward-compatible single-wallet copy (first minting wallet). """
         results = self.try_copy_all(candidate)
         _, ok, message, tx_hash = results[0]
         return ok, message, tx_hash
+
+    def seadrop_unit_price(self, nft_contract: str) -> int:
+        """Read SeaDrop getPublicDrop(nft).mintPrice (wei)."""
+        selector = Web3.keccak(text="getPublicDrop(address)")[:4].hex()
+        data = "0x" + selector + _addr_word(nft_contract)
+        out = self.w3.eth.call(
+            {"to": Web3.to_checksum_address(SEADROP), "data": data}
+        )
+        raw = out.hex() if hasattr(out, "hex") else bytes(out).hex()
+        raw = raw[2:] if raw.startswith("0x") else raw
+        if len(raw) < 64:
+            return 0
+        return int(raw[:64], 16)
+
+    def _resolve_mint_value(
+        self, candidate: MintCandidate, data: str
+    ) -> tuple[int, str | None]:
+        """
+        Return (value_wei, skip_reason).
+
+        SeaDrop public drops can require mintPrice even when the watched
+        wallet's tx shows value=0 (price changed, or free window ended).
+        """
+        value = int(candidate.value_wei)
+        if (
+            candidate.contract_address.lower() != SEADROP
+            or not data.startswith(SEADROP_MINT_PUBLIC)
+        ):
+            return value, None
+
+        try:
+            nft = seadrop_mint_public_nft(data)
+            unit = int(self.seadrop_unit_price(nft))
+        except Exception as exc:
+            log.warning("getPublicDrop failed: %s", exc)
+            return value, None
+
+        qty = max(seadrop_mint_public_quantity(data), 1)
+        required = unit * qty
+        if required <= 0:
+            return value, None
+
+        required_eth = Web3.from_wei(required, "ether")
+        unit_eth = Web3.from_wei(unit, "ether")
+        if self.settings.free_mints_only and value < required:
+            return (
+                value,
+                (
+                    f"Skipped: paid SeaDrop mint ({unit_eth} ETH × {qty} = "
+                    f"{required_eth} ETH). FREE_MINTS_ONLY=true"
+                ),
+            )
+        return max(value, required), None
 
     def _try_copy_with(
         self, account: LocalAccount, candidate: MintCandidate
@@ -244,23 +355,37 @@ class MintCopyService:
             if "not copyable" in rewrite_note.lower():
                 return False, f"Skipped: {rewrite_note}", None
 
+            value_wei, skip_reason = self._resolve_mint_value(candidate, data)
+            if skip_reason:
+                return False, skip_reason, None
+
             attempts = [data]
             if (
                 candidate.contract_address.lower() == SEADROP
                 and data.startswith(SEADROP_MINT_PUBLIC)
-                and len(data) >= 10 + 64 * 4
+                and seadrop_mint_public_quantity(data) > 1
             ):
-                qty_word = data[-64:]
-                if int(qty_word, 16) > 1:
-                    attempts.append(data[:-64] + "0" * 63 + "1")
+                attempts.append(with_seadrop_mint_public_quantity(data, 1))
 
             last_err = ""
             for attempt_i, attempt_data in enumerate(attempts):
+                attempt_value = value_wei
+                if (
+                    attempt_i > 0
+                    and candidate.contract_address.lower() == SEADROP
+                    and attempt_data.startswith(SEADROP_MINT_PUBLIC)
+                    and value_wei > 0
+                ):
+                    # Scale payment down when retrying quantity=1.
+                    full_qty = seadrop_mint_public_quantity(data)
+                    if full_qty > 1:
+                        attempt_value = value_wei // full_qty
+
                 tx: dict = {
                     "from": my_wallet,
                     "to": Web3.to_checksum_address(candidate.contract_address),
                     "data": attempt_data,
-                    "value": candidate.value_wei,
+                    "value": attempt_value,
                     "gas": self.settings.gas_limit,
                     "chainId": self.settings.chain_id,
                 }
@@ -301,7 +426,7 @@ class MintCopyService:
                     return (
                         True,
                         (
-                            f"DRY_RUN OK — would mint {candidate.value_eth} ETH to "
+                            f"DRY_RUN OK — would mint {Web3.from_wei(attempt_value, 'ether')} ETH to "
                             f"{candidate.contract_address} ({qty_note})"
                         ),
                         None,
@@ -310,7 +435,7 @@ class MintCopyService:
                 fee_cap = int(
                     tx.get("maxFeePerGas") or tx.get("gasPrice") or 0
                 )
-                need = self.settings.gas_limit * fee_cap + int(candidate.value_wei)
+                need = self.settings.gas_limit * fee_cap + int(attempt_value)
                 try:
                     bal = int(self.w3.eth.get_balance(my_wallet))
                 except Exception as exc:
@@ -320,7 +445,7 @@ class MintCopyService:
                     need_eth = Web3.from_wei(need, "ether")
                     return (
                         False,
-                        f"Insufficient ETH for gas: have {have_eth}, need ~{need_eth}",
+                        f"Insufficient ETH for gas+mint: have {have_eth}, need ~{need_eth}",
                         None,
                     )
 
