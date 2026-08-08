@@ -42,8 +42,23 @@ async def watch_loop(
     last_capacity_alert = 0.0
     last_blip_alert = 0.0
     rpc_was_full = False
+    provider = getattr(watcher.w3, "provider", None)
+    seen_failovers = getattr(provider, "failover_count", 0)
     while True:
         try:
+            # A silent failover still means a node hit its limit — report it.
+            failovers = getattr(provider, "failover_count", 0)
+            if failovers > seen_failovers:
+                seen_failovers = failovers
+                try:
+                    await tracker.notify(
+                        "🔁 Switched RPC node (previous one was full/failing)\n"
+                        f"Now using: {provider.active_endpoint}\n"
+                        f"Reason: {provider.last_failover_reason}"
+                    )
+                except Exception:
+                    pass
+
             if watcher.enabled:
                 candidates = await asyncio.to_thread(watcher.poll)
                 if rpc_was_full:

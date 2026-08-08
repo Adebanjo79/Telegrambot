@@ -1,4 +1,5 @@
 from bot.rpc import (
+    is_endpoint_down_error,
     is_rpc_capacity_error,
     is_transient_rpc_error,
     rpc_call,
@@ -19,6 +20,14 @@ def test_is_rpc_capacity_error():
     assert is_rpc_capacity_error(Exception("rate limit reached"))
     assert not is_rpc_capacity_error(ConnectionError("Connection refused"))
     assert not is_rpc_capacity_error(ValueError("bad private key"))
+
+
+def test_is_endpoint_down_error():
+    assert is_endpoint_down_error(Exception("401 Client Error: Unauthorized"))
+    assert is_endpoint_down_error(Exception("Max retries exceeded with url"))
+    assert not is_endpoint_down_error(Exception("429 Too Many Requests"))
+    # A dead endpoint should still be retried/failed over, not crash the loop.
+    assert is_transient_rpc_error(Exception("401 Client Error: Unauthorized"))
 
 
 def test_rpc_capacity_message_mentions_full():

@@ -6,7 +6,11 @@ from typing import Any
 from web3 import HTTPProvider
 from web3.types import RPCEndpoint, RPCResponse
 
-from bot.rpc import is_rpc_capacity_error, is_transient_rpc_error
+from bot.rpc import (
+    is_endpoint_down_error,
+    is_rpc_capacity_error,
+    is_transient_rpc_error,
+)
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +29,7 @@ class FailoverHTTPProvider(HTTPProvider):
         self.endpoints = list(endpoints)
         self._index = 0
         self.last_failover_reason = ""
+        self.failover_count = 0
         # web3's own retry loop would delay switching nodes; we handle it here.
         kwargs.setdefault("exception_retry_configuration", None)
         super().__init__(self.endpoints[0], **kwargs)
@@ -39,6 +44,7 @@ class FailoverHTTPProvider(HTTPProvider):
         previous = self.active_endpoint
         self._index = (self._index + 1) % len(self.endpoints)
         self.last_failover_reason = reason
+        self.failover_count += 1
         log.warning(
             "Switching RPC endpoint %s -> %s (%s)",
             previous,
@@ -68,7 +74,9 @@ class FailoverHTTPProvider(HTTPProvider):
             except Exception as exc:  # noqa: BLE001 - rotate then re-raise
                 last_exc = exc
                 if not (
-                    is_rpc_capacity_error(exc) or is_transient_rpc_error(exc)
+                    is_rpc_capacity_error(exc)
+                    or is_endpoint_down_error(exc)
+                    or is_transient_rpc_error(exc)
                 ):
                     raise
                 self._rotate(str(exc))

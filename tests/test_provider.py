@@ -47,6 +47,24 @@ def test_rotates_on_json_rpc_quota_error_response():
     assert provider.active_endpoint == BACKUP
 
 
+def test_rotates_when_endpoint_key_is_revoked():
+    provider = FailoverHTTPProvider([PRIMARY, BACKUP])
+
+    def fake_make_request(self, method, params):
+        if self.endpoint_uri == PRIMARY:
+            raise Exception("401 Client Error: Unauthorized for url: " + PRIMARY)
+        return {"jsonrpc": "2.0", "id": 1, "result": "0x3"}
+
+    with patch(
+        "web3.providers.rpc.HTTPProvider.make_request", new=fake_make_request
+    ):
+        result = provider.make_request("eth_blockNumber", [])
+
+    assert result["result"] == "0x3"
+    assert provider.active_endpoint == BACKUP
+    assert provider.failover_count == 1
+
+
 def test_non_transient_error_is_raised_without_rotation():
     provider = FailoverHTTPProvider([PRIMARY, BACKUP])
 

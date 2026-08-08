@@ -45,6 +45,25 @@ RETRY_HINTS = (
     "service unavailable",
 )
 
+# Endpoint is unusable (revoked key, deleted node, DNS/TLS failure).
+# Worth failing over to another node, but retrying the same one won't help.
+ENDPOINT_DOWN_HINTS = (
+    "401 client error",
+    "unauthorized",
+    "403 client error",
+    "forbidden",
+    "404 client error",
+    "invalid api key",
+    "invalid credentials",
+    "access denied",
+    "name or service not known",
+    "failed to resolve",
+    "nodename nor servname",
+    "temporary failure in name resolution",
+    "max retries exceeded",
+    "ssl",
+)
+
 # Provider quota / rate-limit / "RPC is full" signals.
 CAPACITY_HINTS = (
     "429",
@@ -84,9 +103,15 @@ def is_rpc_capacity_error(exc: BaseException) -> bool:
     return any(hint in blob for hint in CAPACITY_HINTS)
 
 
+def is_endpoint_down_error(exc: BaseException) -> bool:
+    """True when this endpoint itself is unusable (bad key, gone, DNS/TLS)."""
+    blob = _error_blob(exc)
+    return any(hint in blob for hint in ENDPOINT_DOWN_HINTS)
+
+
 def is_transient_rpc_error(exc: BaseException) -> bool:
     blob = _error_blob(exc)
-    if is_rpc_capacity_error(exc):
+    if is_rpc_capacity_error(exc) or is_endpoint_down_error(exc):
         return True
     return any(hint in blob for hint in RETRY_HINTS)
 
