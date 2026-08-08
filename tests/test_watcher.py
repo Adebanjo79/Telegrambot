@@ -39,6 +39,9 @@ def _settings(**overrides) -> Settings:
         poll_interval_sec=1.0,
         gas_limit=500000,
         max_catchup_blocks=25,
+        rpc_rate_limit=25.0,
+        rpc_warn_percent=80.0,
+        rpc_slow_ms=1500.0,
     )
     base.update(overrides)
     return Settings(**base)

@@ -70,6 +70,9 @@ class Settings:
     poll_interval_sec: float
     gas_limit: int
     max_catchup_blocks: int
+    rpc_rate_limit: float
+    rpc_warn_percent: float
+    rpc_slow_ms: float
 
     @classmethod
     def load(cls, env_file: str | None = ".env") -> "Settings":
@@ -145,4 +148,8 @@ class Settings:
             poll_interval_sec=float(_opt("POLL_INTERVAL_SEC", "1.0")),
             gas_limit=int(_opt("GAS_LIMIT", "500000")),
             max_catchup_blocks=int(_opt("MAX_CATCHUP_BLOCKS", "25")),
+            # Your plan's requests/second cap, used for "almost full" warnings.
+            rpc_rate_limit=float(_opt("RPC_RATE_LIMIT", "25")),
+            rpc_warn_percent=float(_opt("RPC_WARN_PERCENT", "80")),
+            rpc_slow_ms=float(_opt("RPC_SLOW_MS", "1500")),
         )

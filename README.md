@@ -86,6 +86,22 @@ python main.py
 | `DRY_RUN` | `true` = notify + simulate only (recommended first) |
 | `POLL_INTERVAL_SEC` | Block poll interval |
 | `GAS_LIMIT` | Gas limit for copy txs |
+| `RPC_RATE_LIMIT` | Your plan's requests/second cap (default `25`) |
+| `RPC_WARN_PERCENT` | Warn once usage passes this share of the cap (default `80`) |
+| `RPC_SLOW_MS` | Warn when average response time exceeds this (default `1500`) |
+
+## RPC alerts
+
+The bot watches its own request rate and latency, and messages you on Telegram:
+
+| Message | Meaning |
+|---|---|
+| `⚠️ RPC is getting close to its limit` | Above `RPC_WARN_PERCENT` of the cap, or responses are slow |
+| `🚨 RPC FULL / rate-limited` | The provider is already rejecting requests |
+| `🔁 Switched RPC node` | Failed over to the next entry in `RPC_URLS` |
+| `✅ RPC back to normal` / `✅ RPC recovered` | Load or errors cleared |
+
+Warnings repeat at most every 3 minutes while a problem lasts.
 
 ## Telegram commands
 

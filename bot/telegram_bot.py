@@ -29,6 +29,8 @@ class TelegramTracker:
         self.mint_copy = mint_copy
         self.rpc_health = "OK"
         self.rpc_last_error = ""
+        self.rpc_per_sec = 0.0
+        self.rpc_avg_ms = 0.0
         self.app = (
             Application.builder()
             .token(settings.telegram_bot_token)
@@ -98,6 +100,12 @@ class TelegramTracker:
         rpc_line = f"RPC health: {self.rpc_health}"
         if len(self.settings.rpc_urls) > 1:
             rpc_line += f" (failover across {len(self.settings.rpc_urls)} nodes)"
+        limit = self.settings.rpc_rate_limit
+        used_pct = (self.rpc_per_sec / limit * 100.0) if limit > 0 else 0.0
+        rpc_line += (
+            f"\nRPC load: {self.rpc_per_sec:.1f}/{limit:.0f} req/s "
+            f"({used_pct:.0f}% of plan), {self.rpc_avg_ms:.0f} ms avg"
+        )
         if self.rpc_last_error:
             rpc_line += f"\nRPC last error: {self.rpc_last_error}"
         await update.message.reply_text(

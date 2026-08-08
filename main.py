@@ -33,6 +33,66 @@ def build_web3(rpc_urls: tuple[str, ...] | list[str]) -> Web3:
     return w3
 
 
+async def check_rpc_load(
+    tracker: TelegramTracker,
+    provider: FailoverHTTPProvider,
+    now: float,
+    was_warned: bool,
+    last_alert: float,
+) -> tuple[bool, float]:
+    """
+    Warn before the RPC quota is actually hit, and when it turns slow.
+
+    Returns the updated (was_warned, last_alert) pair.
+    """
+    settings = tracker.settings
+    stats = provider.load_stats()
+    per_sec = stats["per_sec"]
+    avg_ms = stats["avg_ms"]
+    tracker.rpc_per_sec = per_sec
+    tracker.rpc_avg_ms = avg_ms
+
+    limit = settings.rpc_rate_limit
+    threshold = limit * (settings.rpc_warn_percent / 100.0)
+    used_pct = (per_sec / limit * 100.0) if limit > 0 else 0.0
+
+    problems: list[str] = []
+    if limit > 0 and per_sec >= threshold:
+        problems.append(
+            f"Quota almost full: {per_sec:.1f}/{limit:.0f} requests per second "
+            f"({used_pct:.0f}% of your plan)"
+        )
+    if stats["requests"] >= 3 and avg_ms >= settings.rpc_slow_ms:
+        problems.append(f"RPC is slow: {avg_ms:.0f} ms average response")
+
+    if problems:
+        tracker.rpc_health = "BUSY" if "Quota" in problems[0] else "SLOW"
+        if not was_warned or now - last_alert >= 180:
+            body = "\n".join(f"• {p}" for p in problems)
+            try:
+                await tracker.notify(
+                    "⚠️ RPC is getting close to its limit\n"
+                    f"{body}\n"
+                    "Mints may be missed if it keeps climbing. "
+                    "Consider upgrading the node or adding a backup to RPC_URLS."
+                )
+            except Exception:
+                pass
+            return True, now
+        return True, last_alert
+
+    if was_warned:
+        tracker.rpc_health = "OK"
+        try:
+            await tracker.notify(
+                "✅ RPC back to normal\n"
+                f"{per_sec:.1f} requests per second, {avg_ms:.0f} ms average."
+            )
+        except Exception:
+            pass
+    return False, last_alert
+
+
 async def watch_loop(
     tracker: TelegramTracker,
     watcher: WalletWatcher,
@@ -44,6 +104,9 @@ async def watch_loop(
     rpc_was_full = False
     provider = getattr(watcher.w3, "provider", None)
     seen_failovers = getattr(provider, "failover_count", 0)
+    last_load_check = 0.0
+    last_load_alert = 0.0
+    load_warned = False
     while True:
         try:
             # A silent failover still means a node hit its limit — report it.
@@ -58,6 +121,13 @@ async def watch_loop(
                     )
                 except Exception:
                     pass
+
+            now = asyncio.get_running_loop().time()
+            if provider is not None and now - last_load_check >= 10:
+                last_load_check = now
+                load_warned, last_load_alert = await check_rpc_load(
+                    tracker, provider, now, load_warned, last_load_alert
+                )
 
             if watcher.enabled:
                 candidates = await asyncio.to_thread(watcher.poll)
@@ -224,6 +294,8 @@ async def async_main() -> int:
             f"Primary wallet: {mint_copy.my_wallet}\n"
             f"RPC endpoints: {len(settings.rpc_urls)}"
             f"{' (auto failover)' if len(settings.rpc_urls) > 1 else ''}\n"
+            f"RPC alerts at {settings.rpc_warn_percent:.0f}% of "
+            f"{settings.rpc_rate_limit:.0f} req/s\n"
             f"Free mints only: {settings.free_mints_only}\n"
             f"Starting at block {head}"
         )
