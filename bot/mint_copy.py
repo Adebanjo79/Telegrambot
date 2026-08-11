@@ -34,9 +34,12 @@ KNOWN_ERRORS = {
     "0xedc01273": "MintQuantityExceedsMaxMintedPerWallet (you already hit this drop's wallet limit)",
     "0x198441cb": "MintQuantityCannotBeZero",
     "0x0d35e921": "IncorrectPayment (this SeaDrop mint requires ETH — not a free mint)",
+    "0xcd1c8867": "InsufficientPayment (this mint requires ETH — not a free mint)",
     "0xf477d26f": "FeeRecipientNotAllowed",
     "0x13da22f2": "NotActive (public drop window closed or not started)",
 }
+
+PAID_MINT_SELECTORS = ("0x0d35e921", "0xcd1c8867")
 
 
 def _addr_word(address: str) -> str:
@@ -254,12 +257,31 @@ class MintCopyService:
             ok, message, tx_hash = self._try_copy_with(accounts[0], candidate)
             return [(accounts[0].address, ok, message, tx_hash)]
 
-        results: list[tuple[str, bool, str, str | None] | None] = [None] * len(
-            accounts
-        )
+        # With free-mints-only, probe once first. Paid drops revert the same for
+        # every wallet — no point burning RPC on all 15.
+        if self.settings.free_mints_only:
+            ok, message, tx_hash = self._try_copy_with(accounts[0], candidate)
+            lower = message.lower()
+            if (not ok) and any(sel in lower for sel in PAID_MINT_SELECTORS):
+                skip = (
+                    "Skipped: paid mint (needs ETH). FREE_MINTS_ONLY=true — "
+                    f"{message}"
+                )
+                log.info("Paid mint detected; skipping remaining wallets")
+                return [(a.address, False, skip, None) for a in accounts]
+            # First wallet finished; run the rest (skip index 0).
+            results: list[tuple[str, bool, str, str | None] | None] = [None] * len(
+                accounts
+            )
+            results[0] = (accounts[0].address, ok, message, tx_hash)
+            rest = list(enumerate(accounts))[1:]
+        else:
+            results = [None] * len(accounts)
+            rest = list(enumerate(accounts))
+
         # Keep concurrency modest; the provider also paces requests. Too many
         # parallel wallets on a 25 req/s plan causes 429s mid-mint.
-        workers = min(len(accounts), 3)
+        workers = min(len(rest) or 1, 3)
 
         def _run(account, i: int) -> None:
             try:
@@ -276,13 +298,14 @@ class MintCopyService:
                 ok,
             )
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            list(
-                pool.map(
-                    lambda item: _run(item[1], item[0]),
-                    enumerate(accounts),
+        if rest:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(
+                    pool.map(
+                        lambda item: _run(item[1], item[0]),
+                        rest,
+                    )
                 )
-            )
 
         # Second pass for wallets that only failed because the RPC was full.
         retry_idxs = [
