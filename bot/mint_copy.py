@@ -253,6 +253,27 @@ class MintCopyService:
             candidate.source_tx_hash,
             len(accounts),
         )
+
+        # SeaDrop signed/allowlist mints are never copyable — skip all wallets
+        # up front so Telegram is not flooded with 15 identical lines.
+        data = candidate.input_data.lower()
+        if not data.startswith("0x"):
+            data = "0x" + data
+        selector = data[:10]
+        if candidate.contract_address.lower() == SEADROP:
+            if selector == SEADROP_MINT_SIGNED:
+                skip = (
+                    "Skipped: SeaDrop mintSigned "
+                    "(signature bound to their wallet — not copyable)"
+                )
+                return [(a.address, False, skip, None) for a in accounts]
+            if selector == SEADROP_MINT_ALLOWLIST:
+                skip = (
+                    "Skipped: SeaDrop allowlist mint "
+                    "(needs their Merkle proof — usually not copyable)"
+                )
+                return [(a.address, False, skip, None) for a in accounts]
+
         if len(accounts) == 1:
             ok, message, tx_hash = self._try_copy_with(accounts[0], candidate)
             return [(accounts[0].address, ok, message, tx_hash)]

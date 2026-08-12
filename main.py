@@ -208,18 +208,24 @@ async def watch_loop(
                         f"Done for this mint: {ok_n} ok, {fail_n} failed "
                         f"(tried {len(results)} wallets)."
                     ]
-                    for wallet, ok, message, copy_hash in results:
-                        short = f"{wallet[:6]}…{wallet[-4:]}"
-                        if ok and copy_hash:
-                            lines.append(
-                                f"✅ {short}\n"
-                                f"{tracker.explorer_tx(copy_hash)}\n"
-                                f"{message}"
-                            )
-                        elif ok:
-                            lines.append(f"✅ {short}: {message}")
-                        else:
-                            lines.append(f"❌ {short}: {message}")
+                    # One shared reason for every wallet (signed/paid/etc.) →
+                    # keep Telegram readable instead of 15 identical ❌ lines.
+                    fail_msgs = {msg for _, ok, msg, _ in results if not ok}
+                    if ok_n == 0 and len(fail_msgs) == 1:
+                        lines.append(f"❌ All {fail_n} wallets: {next(iter(fail_msgs))}")
+                    else:
+                        for wallet, ok, message, copy_hash in results:
+                            short = f"{wallet[:6]}…{wallet[-4:]}"
+                            if ok and copy_hash:
+                                lines.append(
+                                    f"✅ {short}\n"
+                                    f"{tracker.explorer_tx(copy_hash)}\n"
+                                    f"{message}"
+                                )
+                            elif ok:
+                                lines.append(f"✅ {short}: {message}")
+                            else:
+                                lines.append(f"❌ {short}: {message}")
                     text = "\n\n".join(lines)
                     # Telegram hard limit ~4096; split if needed.
                     try:
