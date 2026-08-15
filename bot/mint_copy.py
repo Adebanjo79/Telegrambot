@@ -35,11 +35,18 @@ KNOWN_ERRORS = {
     "0x198441cb": "MintQuantityCannotBeZero",
     "0x0d35e921": "IncorrectPayment (this SeaDrop mint requires ETH — not a free mint)",
     "0xcd1c8867": "InsufficientPayment (this mint requires ETH — not a free mint)",
+    "0xfb8f41b2": "ERC20InsufficientAllowance (this mint needs an ERC20 token payment/approval — not a free mint)",
+    "0xe450d38c": "ERC20InsufficientBalance (this mint needs an ERC20 token — not a free mint)",
     "0xf477d26f": "FeeRecipientNotAllowed",
     "0x13da22f2": "NotActive (public drop window closed or not started)",
 }
 
-PAID_MINT_SELECTORS = ("0x0d35e921", "0xcd1c8867")
+PAID_MINT_SELECTORS = (
+    "0x0d35e921",
+    "0xcd1c8867",
+    "0xfb8f41b2",
+    "0xe450d38c",
+)
 
 
 def _addr_word(address: str) -> str:
