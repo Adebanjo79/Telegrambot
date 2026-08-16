@@ -247,6 +247,29 @@ async def watch_loop(
                                 await tracker.notify("\n\n".join(chunk))
                     except Exception:
                         log.exception("Failed notifying mint results")
+
+                    # Mint-time 429s never reach the poll-loop catch — alert here.
+                    rate_hits = sum(
+                        1
+                        for _, ok, msg, _ in results
+                        if (not ok) and ("429" in msg.lower() or "too many requests" in msg.lower())
+                    )
+                    if rate_hits:
+                        rpc_was_full = True
+                        tracker.rpc_health = "FULL"
+                        tracker.rpc_last_error = f"{rate_hits} wallet(s) hit RPC 429 during mint"
+                        now = asyncio.get_running_loop().time()
+                        if now - last_capacity_alert >= 10:
+                            last_capacity_alert = now
+                            try:
+                                await tracker.notify(
+                                    "🚨 RPC FULL / rate-limited\n"
+                                    f"{rate_hits} of {len(results)} minting wallets "
+                                    "got Too Many Requests during this mint.\n"
+                                    "Bot will keep retrying / use backup RPC if configured."
+                                )
+                            except Exception:
+                                pass
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -257,8 +280,8 @@ async def watch_loop(
                 rpc_was_full = True
                 tracker.rpc_health = "FULL"
                 tracker.rpc_last_error = str(exc)
-                # Always alert on first hit; remind every 60s while still full.
-                if first_full or now - last_capacity_alert >= 60:
+                # Always alert on first hit; remind every 15s while still full.
+                if first_full or now - last_capacity_alert >= 15:
                     last_capacity_alert = now
                     try:
                         await tracker.notify(rpc_capacity_message(exc))
