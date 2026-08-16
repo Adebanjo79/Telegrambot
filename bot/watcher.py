@@ -8,13 +8,20 @@ from web3 import Web3
 
 from bot.config import Settings
 from bot.models import MintCandidate
-from bot.rpc import rpc_call
+from bot.rpc import is_transient_rpc_error, rpc_call
 
 log = logging.getLogger(__name__)
+
+# OpenSea SeaDrop (same address on many chains, including Robinhood Chain)
+SEADROP = "0x00005ea00ac477b1030ce78506496e8c2de24bf5"
 
 # Common public mint / claim selectors (first 4 bytes of keccak of the signature).
 # Intentionally excludes approvals / transfers / marketplace selectors.
 MINT_SELECTORS: dict[str, str] = {
+    # SeaDrop — critical so we still catch mints if receipt fetch blips
+    "0x161ac21f": "SeaDrop mintPublic",
+    "0x8d7f0ad4": "SeaDrop mintAllowList",
+    "0x4b61cd6f": "SeaDrop mintSigned",
     "0xa0712d68": "mint(uint256)",
     "0x40c10f19": "mint(address,uint256)",
     "0x6a627842": "mint(address)",
@@ -31,7 +38,7 @@ MINT_SELECTORS: dict[str, str] = {
     "0xefef39a1": "purchase(uint256)",
 }
 
-# ERC-721 Transfer(address,address,uint256) and ERC-1155 TransferSingle
+
 def _topic0(signature: str) -> str:
     raw = Web3.keccak(text=signature).hex()
     return raw if raw.startswith("0x") else "0x" + raw
@@ -62,6 +69,15 @@ def _topic_address(topic: str) -> str:
     return topic
 
 
+def _tx_get(tx: Any, key: str, default: Any = None) -> Any:
+    if isinstance(tx, dict):
+        return tx.get(key, default)
+    try:
+        return tx[key]
+    except Exception:
+        return getattr(tx, key, default)
+
+
 class WalletWatcher:
     """Poll Robinhood Chain for mint-like txs from watched wallets."""
 
@@ -71,6 +87,7 @@ class WalletWatcher:
         self.enabled = True
         self.last_block = 0
         self.target_set = {addr.lower() for addr in settings.target_wallets}
+        self.lag_blocks = 0
 
     def bootstrap(self) -> int:
         head = rpc_call(lambda: self.w3.eth.block_number)
@@ -78,18 +95,37 @@ class WalletWatcher:
         return head
 
     def poll(self) -> list[MintCandidate]:
+        """
+        Scan every new block from last_block+1 onward.
+
+        Never jumps ahead / drops blocks. If the bot is behind, it processes
+        up to max_catchup_blocks per poll and resumes next cycle.
+        """
         if not self.enabled:
             return []
 
         head = rpc_call(lambda: self.w3.eth.block_number)
         if head <= self.last_block:
+            self.lag_blocks = 0
             return []
 
-        start = max(self.last_block + 1, head - self.settings.max_catchup_blocks + 1)
+        start = self.last_block + 1
+        behind = head - self.last_block
+        self.lag_blocks = behind
+        end = min(head, self.last_block + self.settings.max_catchup_blocks)
+        if behind > self.settings.max_catchup_blocks:
+            log.warning(
+                "Watcher is %s blocks behind; scanning %s..%s this cycle "
+                "(will continue next poll — no blocks skipped)",
+                behind,
+                start,
+                end,
+            )
+
         found: list[MintCandidate] = []
         last_ok = self.last_block
 
-        for block_number in range(start, head + 1):
+        for block_number in range(start, end + 1):
             try:
                 block = rpc_call(
                     lambda n=block_number: self.w3.eth.get_block(n, full_transactions=True)
@@ -110,42 +146,76 @@ class WalletWatcher:
                     found.append(candidate)
             last_ok = block_number
 
-        self.last_block = head
+        self.last_block = last_ok
         return found
 
     def _inspect_tx(self, tx: Any, block_number: int) -> MintCandidate | None:
-        tx_from = _normalize_hex(tx.get("from"))
+        tx_from = _normalize_hex(_tx_get(tx, "from"))
         if tx_from not in self.target_set:
             return None
 
-        to_addr = tx.get("to")
+        to_addr = _tx_get(tx, "to")
         if not to_addr:
             return None  # contract creation — skip
 
-        input_data = _normalize_hex(tx.get("input") or tx.get("data") or "0x")
+        input_data = _normalize_hex(_tx_get(tx, "input") or _tx_get(tx, "data") or "0x")
         if input_data in {"0x", "0x0", ""}:
             return None
 
-        value_wei = int(tx.get("value") or 0)
+        value_wei = int(_tx_get(tx, "value") or 0)
         value_eth = Decimal(value_wei) / Decimal(10**18)
         if self.settings.free_mints_only and value_wei > 0:
-            log.info("Skip paid tx %s value=%s ETH", _normalize_hex(tx.get("hash")), value_eth)
+            log.info(
+                "Skip paid tx %s value=%s ETH",
+                _normalize_hex(_tx_get(tx, "hash")),
+                value_eth,
+            )
             return None
 
         selector = input_data[:10] if len(input_data) >= 10 else input_data
         method_hint = MINT_SELECTORS.get(selector)
         looks_like_mint = method_hint is not None
+        to_norm = _normalize_hex(to_addr)
 
+        # SeaDrop calls are always mint candidates even before receipt lands.
+        if to_norm == SEADROP and selector in MINT_SELECTORS:
+            looks_like_mint = True
+
+        tx_hash = _normalize_hex(_tx_get(tx, "hash"))
         receipt_mint = False
-        tx_hash = _normalize_hex(tx.get("hash"))
-        try:
-            receipt = rpc_call(lambda: self.w3.eth.get_transaction_receipt(tx_hash))
-            receipt_mint = self._receipt_shows_mint(receipt)
-            if receipt_mint:
-                looks_like_mint = True
-                method_hint = method_hint or "NFT mint (Transfer from 0x0)"
-        except Exception as exc:
-            log.debug("Receipt check failed for %s: %s", tx_hash, exc)
+        receipt_error: BaseException | None = None
+        for attempt in range(3):
+            try:
+                receipt = rpc_call(lambda: self.w3.eth.get_transaction_receipt(tx_hash))
+                receipt_mint = self._receipt_shows_mint(receipt)
+                if receipt_mint:
+                    looks_like_mint = True
+                    method_hint = method_hint or "NFT mint (Transfer from 0x0)"
+                receipt_error = None
+                break
+            except Exception as exc:
+                receipt_error = exc
+                if not is_transient_rpc_error(exc):
+                    break
+                log.warning(
+                    "Receipt fetch retry %s for %s: %s", attempt + 1, tx_hash, exc
+                )
+
+        if receipt_error is not None:
+            # If we already know it's a mint selector / SeaDrop, still copy it.
+            if looks_like_mint:
+                log.warning(
+                    "Receipt unavailable for mint-like tx %s (%s); copying from calldata",
+                    tx_hash,
+                    receipt_error,
+                )
+            else:
+                log.info(
+                    "Target tx %s receipt check failed and selector unknown: %s",
+                    tx_hash,
+                    receipt_error,
+                )
+                return None
 
         if not looks_like_mint:
             log.info(
@@ -167,9 +237,15 @@ class WalletWatcher:
         )
 
     def _receipt_shows_mint(self, receipt: Any) -> bool:
-        logs = receipt.get("logs") or []
+        logs = receipt.get("logs") if isinstance(receipt, dict) else getattr(receipt, "logs", None)
+        logs = logs or []
         for entry in logs:
-            topics = [_normalize_hex(t) for t in (entry.get("topics") or [])]
+            raw_topics = (
+                entry.get("topics")
+                if isinstance(entry, dict)
+                else getattr(entry, "topics", None)
+            )
+            topics = [_normalize_hex(t) for t in (raw_topics or [])]
             if not topics:
                 continue
 
@@ -180,7 +256,6 @@ class WalletWatcher:
                     return True
             # ERC-1155 TransferSingle: topics[2]=from, topics[3]=to
             if topic0 == _normalize_hex(TRANSFER_SINGLE_TOPIC) and len(topics) >= 3:
-                # Operator is topics[1]; from is topics[2] when indexed
                 if len(topics) >= 3 and _topic_address(topics[2]) == ZERO_ADDR:
                     return True
         return False

@@ -58,6 +58,54 @@ def test_mint_selectors_do_not_include_approvals():
     # setApprovalForAll must never be treated as a mint
     assert "0xa22cb465" not in MINT_SELECTORS
     assert "0xa0712d68" in MINT_SELECTORS
+    assert "0x161ac21f" in MINT_SELECTORS  # SeaDrop mintPublic
+
+
+def test_watcher_detects_seadrop_mint_public_without_receipt_logs():
+    settings = _settings()
+    w3 = MagicMock()
+    watcher = WalletWatcher(settings, w3)
+    w3.eth.get_transaction_receipt.return_value = {"logs": []}
+
+    tx = {
+        "from": settings.target_wallets[0],
+        "to": "0x00005EA00Ac477B1030CE78506496e8C2dE24bf5",
+        "input": (
+            "0x161ac21f"
+            + "000000000000000000000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            + "0000000000000000000000000000a26b00c1f0df003000390027140000faa719"
+            + "000000000000000000000000" + settings.target_wallets[0][2:].lower()
+            + "0000000000000000000000000000000000000000000000000000000000000001"
+        ),
+        "value": 0,
+        "hash": "0x" + "dd" * 32,
+    }
+    candidate = watcher._inspect_tx(tx, 50)
+    assert candidate is not None
+    assert "SeaDrop mintPublic" in candidate.method_hint
+
+
+def test_poll_never_skips_blocks_when_behind():
+    settings = _settings(max_catchup_blocks=2)
+    w3 = MagicMock()
+    watcher = WalletWatcher(settings, w3)
+    watcher.last_block = 100
+    w3.eth.block_number = 110
+
+    def fake_block(n, full_transactions=True):
+        return MagicMock(transactions=[])
+
+    w3.eth.get_block.side_effect = fake_block
+    found = watcher.poll()
+    assert found == []
+    # Only advanced by max_catchup_blocks, did not jump to head.
+    assert watcher.last_block == 102
+    assert watcher.lag_blocks == 10
+
+    w3.eth.block_number = 110
+    watcher.poll()
+    assert watcher.last_block == 104
+
 
 
 def test_watcher_ignores_non_target_and_non_mint():

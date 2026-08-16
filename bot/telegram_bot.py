@@ -128,6 +128,7 @@ class TelegramTracker:
             f"{max(0, len(self.mint_copy.my_wallets) - len(self.settings.private_keys))} file)\n"
             f"Primary wallet: {self.mint_copy.my_wallet}\n"
             f"Last block: {self.watcher.last_block}\n"
+            f"Catch-up lag: {getattr(self.watcher, 'lag_blocks', 0)} blocks\n"
             f"Free mints only: {self.settings.free_mints_only}\n"
             f"Targets: {len(self.settings.target_wallets)}"
         )

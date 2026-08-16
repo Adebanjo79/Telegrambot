@@ -149,7 +149,7 @@ class Settings:
             dry_run=_parse_bool(_opt("DRY_RUN", "true"), True),
             poll_interval_sec=float(_opt("POLL_INTERVAL_SEC", "1.0")),
             gas_limit=int(_opt("GAS_LIMIT", "500000")),
-            max_catchup_blocks=int(_opt("MAX_CATCHUP_BLOCKS", "25")),
+            max_catchup_blocks=int(_opt("MAX_CATCHUP_BLOCKS", "100")),
             # Your plan's requests/second cap, used for "almost full" warnings.
             rpc_rate_limit=float(_opt("RPC_RATE_LIMIT", "25")),
             rpc_warn_percent=float(_opt("RPC_WARN_PERCENT", "80")),

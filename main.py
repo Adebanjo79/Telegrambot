@@ -107,21 +107,137 @@ async def check_rpc_load(
     return False, last_alert
 
 
+async def handle_candidate(
+    tracker: TelegramTracker,
+    mint_copy: MintCopyService,
+    candidate,
+    state: dict,
+) -> None:
+    settings = tracker.settings
+    if mint_copy.already_copied(candidate.source_tx_hash):
+        return
+
+    await tracker.notify(
+        "👀 Target mint activity\n"
+        f"From: {candidate.target_wallet}\n"
+        f"Block: {candidate.block_number}\n"
+        f"Contract: {candidate.contract_address}\n"
+        f"Value: {candidate.value_eth} ETH\n"
+        f"Hint: {candidate.method_hint}\n"
+        f"Source: {tracker.explorer_tx(candidate.source_tx_hash)}\n"
+        f"Minting wallets: {len(mint_copy.my_wallets)} (parallel)\n"
+        f"{'Simulating (DRY_RUN)…' if settings.dry_run else 'Copying…'}"
+    )
+
+    results = await asyncio.to_thread(mint_copy.try_copy_all, candidate)
+    ok_n = sum(1 for _, ok, _, _ in results if ok)
+    fail_n = len(results) - ok_n
+    lines = [
+        f"Done for this mint: {ok_n} ok, {fail_n} failed "
+        f"(tried {len(results)} wallets)."
+    ]
+    fail_msgs = {msg for _, ok, msg, _ in results if not ok}
+    if ok_n == 0 and len(fail_msgs) == 1:
+        lines.append(f"❌ All {fail_n} wallets: {next(iter(fail_msgs))}")
+    else:
+        for wallet, ok, message, copy_hash in results:
+            short = f"{wallet[:6]}…{wallet[-4:]}"
+            if ok and copy_hash:
+                lines.append(
+                    f"✅ {short}\n"
+                    f"{tracker.explorer_tx(copy_hash)}\n"
+                    f"{message}"
+                )
+            elif ok:
+                lines.append(f"✅ {short}: {message}")
+            else:
+                lines.append(f"❌ {short}: {message}")
+    text = "\n\n".join(lines)
+    try:
+        if len(text) <= 4000:
+            await tracker.notify(text)
+        else:
+            chunk: list[str] = [lines[0]]
+            size = len(lines[0])
+            for line in lines[1:]:
+                add = len(line) + 2
+                if size + add > 4000:
+                    await tracker.notify("\n\n".join(chunk))
+                    chunk = [line]
+                    size = len(line)
+                else:
+                    chunk.append(line)
+                    size += add
+            if chunk:
+                await tracker.notify("\n\n".join(chunk))
+    except Exception:
+        log.exception("Failed notifying mint results")
+
+    rate_hits = sum(
+        1
+        for _, ok, msg, _ in results
+        if (not ok)
+        and ("429" in msg.lower() or "too many requests" in msg.lower())
+    )
+    if rate_hits:
+        state["rpc_was_full"] = True
+        tracker.rpc_health = "FULL"
+        tracker.rpc_last_error = f"{rate_hits} wallet(s) hit RPC 429 during mint"
+        now = asyncio.get_running_loop().time()
+        if now - state["last_capacity_alert"] >= 10:
+            state["last_capacity_alert"] = now
+            try:
+                await tracker.notify(
+                    "🚨 RPC FULL / rate-limited\n"
+                    f"{rate_hits} of {len(results)} minting wallets "
+                    "got Too Many Requests during this mint.\n"
+                    "Bot will keep retrying / use backup RPC if configured."
+                )
+            except Exception:
+                pass
+
+
+async def mint_worker(
+    queue: asyncio.Queue,
+    tracker: TelegramTracker,
+    mint_copy: MintCopyService,
+    state: dict,
+) -> None:
+    """Copy mints in the background so the block watcher never pauses."""
+    while True:
+        candidate = await queue.get()
+        try:
+            await handle_candidate(tracker, mint_copy, candidate, state)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Mint worker failed for %s", candidate.source_tx_hash)
+            try:
+                await tracker.notify(
+                    f"⚠️ Mint worker error for {candidate.source_tx_hash}"
+                )
+            except Exception:
+                pass
+        finally:
+            queue.task_done()
+
+
 async def watch_loop(
     tracker: TelegramTracker,
     watcher: WalletWatcher,
     mint_copy: MintCopyService,
+    mint_queue: asyncio.Queue,
+    state: dict,
 ) -> None:
     settings = tracker.settings
-    last_capacity_alert = 0.0
     last_blip_alert = 0.0
-    rpc_was_full = False
     provider = getattr(watcher.w3, "provider", None)
     seen_switches = getattr(provider, "switch_count", 0)
     last_load_check = 0.0
     last_load_alert = 0.0
     last_failback_check = 0.0
     load_warned = False
+    last_lag_alert = 0.0
     while True:
         try:
             # Report both failover (to backup) and failback (to primary).
@@ -173,8 +289,8 @@ async def watch_loop(
 
             if watcher.enabled:
                 candidates = await asyncio.to_thread(watcher.poll)
-                if rpc_was_full:
-                    rpc_was_full = False
+                if state.get("rpc_was_full"):
+                    state["rpc_was_full"] = False
                     tracker.rpc_health = "OK"
                     tracker.rpc_last_error = ""
                     try:
@@ -183,106 +299,34 @@ async def watch_loop(
                         )
                     except Exception:
                         pass
+
+                if watcher.lag_blocks > settings.max_catchup_blocks and now - last_lag_alert > 120:
+                    last_lag_alert = now
+                    try:
+                        await tracker.notify(
+                            f"⏳ Catching up: {watcher.lag_blocks} blocks behind "
+                            "(no blocks skipped — scanning as fast as RPC allows)."
+                        )
+                    except Exception:
+                        pass
+
                 for candidate in candidates:
                     if mint_copy.already_copied(candidate.source_tx_hash):
                         continue
-
-                    await tracker.notify(
-                        "👀 Target mint activity\n"
-                        f"From: {candidate.target_wallet}\n"
-                        f"Block: {candidate.block_number}\n"
-                        f"Contract: {candidate.contract_address}\n"
-                        f"Value: {candidate.value_eth} ETH\n"
-                        f"Hint: {candidate.method_hint}\n"
-                        f"Source: {tracker.explorer_tx(candidate.source_tx_hash)}\n"
-                        f"Minting wallets: {len(mint_copy.my_wallets)} (parallel)\n"
-                        f"{'Simulating (DRY_RUN)…' if settings.dry_run else 'Copying…'}"
-                    )
-
-                    results = await asyncio.to_thread(mint_copy.try_copy_all, candidate)
-                    ok_n = sum(1 for _, ok, _, _ in results if ok)
-                    fail_n = len(results) - ok_n
-                    # One combined Telegram message so rate limits don't drop
-                    # per-wallet results (this was hiding failures before).
-                    lines = [
-                        f"Done for this mint: {ok_n} ok, {fail_n} failed "
-                        f"(tried {len(results)} wallets)."
-                    ]
-                    # One shared reason for every wallet (signed/paid/etc.) →
-                    # keep Telegram readable instead of 15 identical ❌ lines.
-                    fail_msgs = {msg for _, ok, msg, _ in results if not ok}
-                    if ok_n == 0 and len(fail_msgs) == 1:
-                        lines.append(f"❌ All {fail_n} wallets: {next(iter(fail_msgs))}")
-                    else:
-                        for wallet, ok, message, copy_hash in results:
-                            short = f"{wallet[:6]}…{wallet[-4:]}"
-                            if ok and copy_hash:
-                                lines.append(
-                                    f"✅ {short}\n"
-                                    f"{tracker.explorer_tx(copy_hash)}\n"
-                                    f"{message}"
-                                )
-                            elif ok:
-                                lines.append(f"✅ {short}: {message}")
-                            else:
-                                lines.append(f"❌ {short}: {message}")
-                    text = "\n\n".join(lines)
-                    # Telegram hard limit ~4096; split if needed.
-                    try:
-                        if len(text) <= 4000:
-                            await tracker.notify(text)
-                        else:
-                            chunk: list[str] = [lines[0]]
-                            size = len(lines[0])
-                            for line in lines[1:]:
-                                add = len(line) + 2
-                                if size + add > 4000:
-                                    await tracker.notify("\n\n".join(chunk))
-                                    chunk = [line]
-                                    size = len(line)
-                                else:
-                                    chunk.append(line)
-                                    size += add
-                            if chunk:
-                                await tracker.notify("\n\n".join(chunk))
-                    except Exception:
-                        log.exception("Failed notifying mint results")
-
-                    # Mint-time 429s never reach the poll-loop catch — alert here.
-                    rate_hits = sum(
-                        1
-                        for _, ok, msg, _ in results
-                        if (not ok) and ("429" in msg.lower() or "too many requests" in msg.lower())
-                    )
-                    if rate_hits:
-                        rpc_was_full = True
-                        tracker.rpc_health = "FULL"
-                        tracker.rpc_last_error = f"{rate_hits} wallet(s) hit RPC 429 during mint"
-                        now = asyncio.get_running_loop().time()
-                        if now - last_capacity_alert >= 10:
-                            last_capacity_alert = now
-                            try:
-                                await tracker.notify(
-                                    "🚨 RPC FULL / rate-limited\n"
-                                    f"{rate_hits} of {len(results)} minting wallets "
-                                    "got Too Many Requests during this mint.\n"
-                                    "Bot will keep retrying / use backup RPC if configured."
-                                )
-                            except Exception:
-                                pass
+                    await mint_queue.put(candidate)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             now = asyncio.get_running_loop().time()
             if is_rpc_capacity_error(exc):
                 log.warning("RPC FULL / rate-limited (will retry): %s", exc)
-                first_full = not rpc_was_full
-                rpc_was_full = True
+                first_full = not state.get("rpc_was_full")
+                state["rpc_was_full"] = True
                 tracker.rpc_health = "FULL"
                 tracker.rpc_last_error = str(exc)
                 # Always alert on first hit; remind every 15s while still full.
-                if first_full or now - last_capacity_alert >= 15:
-                    last_capacity_alert = now
+                if first_full or now - state["last_capacity_alert"] >= 15:
+                    state["last_capacity_alert"] = now
                     try:
                         await tracker.notify(rpc_capacity_message(exc))
                     except Exception:
@@ -314,7 +358,11 @@ async def watch_loop(
             except Exception:
                 pass
 
-        await asyncio.sleep(settings.poll_interval_sec)
+        # Poll faster when catching up so free mints are not delayed.
+        delay = settings.poll_interval_sec
+        if watcher.lag_blocks > 0:
+            delay = min(delay, 0.35)
+        await asyncio.sleep(delay)
 
 
 async def async_main() -> int:
@@ -376,18 +424,28 @@ async def async_main() -> int:
             f"Starting at block {head}"
         )
 
-        watch_task = asyncio.create_task(watch_loop(tracker, watcher, mint_copy))
+        watch_task = None
+        worker_task = None
+        mint_queue: asyncio.Queue = asyncio.Queue()
+        state = {"rpc_was_full": False, "last_capacity_alert": 0.0}
         try:
+            worker_task = asyncio.create_task(
+                mint_worker(mint_queue, tracker, mint_copy, state)
+            )
+            watch_task = asyncio.create_task(
+                watch_loop(tracker, watcher, mint_copy, mint_queue, state)
+            )
             await watch_task
         except asyncio.CancelledError:
             pass
         finally:
-            if not watch_task.done():
-                watch_task.cancel()
-                try:
-                    await watch_task
-                except asyncio.CancelledError:
-                    pass
+            for task in (watch_task, worker_task):
+                if task is not None and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
             await tracker.app.updater.stop()
             await tracker.app.stop()
 
