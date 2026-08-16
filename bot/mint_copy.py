@@ -280,6 +280,10 @@ class MintCopyService:
                     "(needs their Merkle proof — usually not copyable)"
                 )
                 return [(a.address, False, skip, None) for a in accounts]
+            if selector == SEADROP_MINT_PUBLIC and int(candidate.value_wei) == 0:
+                # Free public SeaDrop: simulate once, then blast every wallet
+                # so short drop windows don't close mid-queue.
+                return self._try_copy_seadrop_public_fast(accounts, candidate)
 
         if len(accounts) == 1:
             ok, message, tx_hash = self._try_copy_with(accounts[0], candidate)
@@ -297,6 +301,9 @@ class MintCopyService:
                 )
                 log.info("Paid mint detected; skipping remaining wallets")
                 return [(a.address, False, skip, None) for a in accounts]
+            if (not ok) and "0x13da22f2" in lower:
+                skip = f"Skipped: drop already NotActive — {message}"
+                return [(a.address, False, skip, None) for a in accounts]
             # First wallet finished; run the rest (skip index 0).
             results: list[tuple[str, bool, str, str | None] | None] = [None] * len(
                 accounts
@@ -310,14 +317,25 @@ class MintCopyService:
         # Keep concurrency modest; the provider also paces requests. Too many
         # parallel wallets on a 25 req/s plan causes 429s mid-mint.
         workers = min(len(rest) or 1, 3)
+        stop_reason: list[str] = []
 
         def _run(account, i: int) -> None:
+            if stop_reason:
+                results[i] = (
+                    account.address,
+                    False,
+                    f"Skipped: {stop_reason[0]}",
+                    None,
+                )
+                return
             try:
                 ok, message, tx_hash = self._try_copy_with(account, candidate)
             except Exception as exc:
                 log.exception("Wallet copy crashed for %s", account.address)
                 ok, message, tx_hash = False, f"Copy crashed: {exc}", None
             results[i] = (account.address, ok, message, tx_hash)
+            if (not ok) and "0x13da22f2" in message.lower() and not stop_reason:
+                stop_reason.append("drop became NotActive while copying")
             log.info(
                 "Wallet %s/%s %s -> ok=%s",
                 i + 1,
@@ -339,9 +357,12 @@ class MintCopyService:
         retry_idxs = [
             i
             for i, r in enumerate(results)
-            if r is not None and not r[1] and "429" in r[2].lower()
+            if r is not None
+            and not r[1]
+            and "429" in r[2].lower()
+            and "notactive" not in r[2].lower()
         ]
-        if retry_idxs:
+        if retry_idxs and not stop_reason:
             log.warning(
                 "Retrying %s wallet(s) after RPC 429 on mint %s",
                 len(retry_idxs),
@@ -357,6 +378,212 @@ class MintCopyService:
                 )
 
         return [r for r in results if r is not None]
+
+    def _fee_fields(self) -> dict:
+        tx_fees: dict = {}
+        try:
+            latest = self.w3.eth.get_block("latest")
+            base_fee = latest.get("baseFeePerGas")
+            if base_fee is not None:
+                tip = self.w3.to_wei(0.05, "gwei")
+                tx_fees["maxPriorityFeePerGas"] = tip
+                tx_fees["maxFeePerGas"] = int(base_fee) * 2 + tip
+            else:
+                tx_fees["gasPrice"] = self.w3.eth.gas_price
+        except Exception:
+            tx_fees["gasPrice"] = self.w3.eth.gas_price
+        return tx_fees
+
+    def _try_copy_seadrop_public_fast(
+        self, accounts: list[LocalAccount], candidate: MintCandidate
+    ) -> list[tuple[str, bool, str, str | None]]:
+        """
+        Free SeaDrop mintPublic fast path.
+
+        Simulate once, prefetch nonce+balance for every wallet, sign locally,
+        then blast sendRawTransaction. Avoids per-wallet eth_call so short
+        public windows don't close before later wallets fire.
+        """
+        primary = accounts[0]
+        data, rewrite_note = rewrite_calldata_for_my_wallet(
+            candidate.input_data,
+            candidate.target_wallet,
+            primary.address,
+            candidate.contract_address,
+        )
+        value_wei, skip_reason = self._resolve_mint_value(candidate, data)
+        if skip_reason:
+            return [(a.address, False, skip_reason, None) for a in accounts]
+
+        to_addr = Web3.to_checksum_address(candidate.contract_address)
+        fees = self._fee_fields()
+        sim_tx: dict = {
+            "from": primary.address,
+            "to": to_addr,
+            "data": data,
+            "value": value_wei,
+            "gas": self.settings.gas_limit,
+            "chainId": self.settings.chain_id,
+            **fees,
+        }
+        try:
+            self.w3.eth.call(sim_tx)
+        except ContractLogicError as exc:
+            err = friendly_revert(exc)
+            # qty=1 fallback once if original quantity fails for a non-window reason
+            if (
+                seadrop_mint_public_quantity(data) > 1
+                and "0x13da22f2" not in err.lower()
+            ):
+                data = with_seadrop_mint_public_quantity(data, 1)
+                sim_tx["data"] = data
+                try:
+                    self.w3.eth.call(sim_tx)
+                    rewrite_note = f"{rewrite_note}; qty=1 retry"
+                except ContractLogicError as exc2:
+                    err = friendly_revert(exc2)
+                    skip = f"Simulation reverted: {err} | adapt={rewrite_note}"
+                    return [(a.address, False, skip, None) for a in accounts]
+                except Exception as exc2:
+                    skip = f"Simulation failed: {exc2} | adapt={rewrite_note}"
+                    return [(a.address, False, skip, None) for a in accounts]
+            else:
+                skip = f"Simulation reverted: {err} | adapt={rewrite_note}"
+                return [(a.address, False, skip, None) for a in accounts]
+        except Exception as exc:
+            skip = f"Simulation failed: {exc} | adapt={rewrite_note}"
+            return [(a.address, False, skip, None) for a in accounts]
+
+        if self.settings.dry_run:
+            msg = (
+                f"DRY_RUN OK — would mint {Web3.from_wei(value_wei, 'ether')} ETH "
+                f"({rewrite_note}) [fast SeaDrop blast]"
+            )
+            return [(a.address, True, msg, None) for a in accounts]
+
+        fee_cap = int(fees.get("maxFeePerGas") or fees.get("gasPrice") or 0)
+        need = self.settings.gas_limit * fee_cap + int(value_wei)
+        n = len(accounts)
+        results: list[tuple[str, bool, str, str | None] | None] = [None] * n
+        # Prefetch phase: parallel balance+nonce (still paced by provider).
+        # Broadcast phase: all wallets at once — window is the bottleneck.
+        workers = min(n, 15)
+        window_closed = False
+
+        def _prep(account: LocalAccount, i: int) -> bytes | None:
+            """Return signed raw tx bytes, or set results[i] on skip/fail."""
+            nonlocal window_closed
+            wallet = account.address
+            if window_closed:
+                results[i] = (
+                    wallet,
+                    False,
+                    "Skipped: drop became NotActive while copying",
+                    None,
+                )
+                return None
+            try:
+                bal = int(self.w3.eth.get_balance(wallet))
+                if bal < need:
+                    results[i] = (
+                        wallet,
+                        False,
+                        (
+                            f"Insufficient ETH for gas+mint: have "
+                            f"{Web3.from_wei(bal, 'ether')}, need ~"
+                            f"{Web3.from_wei(need, 'ether')}"
+                        ),
+                        None,
+                    )
+                    return None
+                nonce = self.w3.eth.get_transaction_count(wallet, "pending")
+                tx = {
+                    "from": wallet,
+                    "to": to_addr,
+                    "data": data,
+                    "value": value_wei,
+                    "gas": self.settings.gas_limit,
+                    "chainId": self.settings.chain_id,
+                    "nonce": nonce,
+                    **fees,
+                }
+                signed = account.sign_transaction(tx)
+                return getattr(signed, "raw_transaction", None) or signed.rawTransaction
+            except Exception as exc:
+                results[i] = (wallet, False, f"Prep failed: {exc}", None)
+                log.warning("Fast SeaDrop prep failed for %s: %s", wallet, exc)
+                return None
+
+        def _broadcast(account: LocalAccount, i: int, raw: bytes | None) -> None:
+            nonlocal window_closed
+            wallet = account.address
+            if results[i] is not None:
+                return
+            if raw is None:
+                if results[i] is None:
+                    results[i] = (wallet, False, "Prep failed: no signed tx", None)
+                return
+            if window_closed:
+                results[i] = (
+                    wallet,
+                    False,
+                    "Skipped: drop became NotActive while copying",
+                    None,
+                )
+                return
+            try:
+                tx_hash = self.w3.eth.send_raw_transaction(raw)
+                hex_hash = tx_hash.hex()
+                if not hex_hash.startswith("0x"):
+                    hex_hash = "0x" + hex_hash
+                results[i] = (
+                    wallet,
+                    True,
+                    f"Copy mint submitted ({rewrite_note}) [fast].",
+                    hex_hash,
+                )
+            except Exception as exc:
+                text = str(exc).lower()
+                if "0x13da22f2" in text or "notactive" in text:
+                    window_closed = True
+                    msg = (
+                        "NotActive (public drop window closed or not started) "
+                        "[0x13da22f2]"
+                    )
+                else:
+                    msg = f"Broadcast failed: {exc}"
+                results[i] = (wallet, False, msg, None)
+                log.warning("Fast SeaDrop send failed for %s: %s", wallet, exc)
+
+        log.info(
+            "Fast SeaDrop blast for %s with %s wallets",
+            candidate.source_tx_hash,
+            n,
+        )
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            signed_raw = list(
+                pool.map(
+                    lambda item: _prep(item[1], item[0]),
+                    enumerate(accounts),
+                )
+            )
+        # Blast sends as a separate wave so signing/RPC prep doesn't serialize
+        # behind earlier wallets' broadcasts.
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(
+                pool.map(
+                    lambda item: _broadcast(item[1], item[0], signed_raw[item[0]]),
+                    enumerate(accounts),
+                )
+            )
+
+        out: list[tuple[str, bool, str, str | None]] = []
+        for i, account in enumerate(accounts):
+            if results[i] is None:
+                out.append((account.address, False, "Unknown fast-path failure", None))
+            else:
+                out.append(results[i])
+        return out
 
     def try_copy(self, candidate: MintCandidate) -> tuple[bool, str, str | None]:
         """ Backward-compatible single-wallet copy (first minting wallet). """
