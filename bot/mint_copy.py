@@ -417,44 +417,45 @@ class MintCopyService:
 
         to_addr = Web3.to_checksum_address(candidate.contract_address)
         fees = self._fee_fields()
-        sim_tx: dict = {
-            "from": primary.address,
-            "to": to_addr,
-            "data": data,
-            "value": value_wei,
-            "gas": self.settings.gas_limit,
-            "chainId": self.settings.chain_id,
-            **fees,
-        }
-        try:
-            self.w3.eth.call(sim_tx)
-        except ContractLogicError as exc:
-            err = friendly_revert(exc)
-            # qty=1 fallback once if original quantity fails for a non-window reason
-            if (
-                seadrop_mint_public_quantity(data) > 1
-                and "0x13da22f2" not in err.lower()
-            ):
-                data = with_seadrop_mint_public_quantity(data, 1)
-                sim_tx["data"] = data
-                try:
-                    self.w3.eth.call(sim_tx)
-                    rewrite_note = f"{rewrite_note}; qty=1 retry"
-                except ContractLogicError as exc2:
-                    err = friendly_revert(exc2)
-                    skip = f"Simulation reverted: {err} | adapt={rewrite_note}"
-                    return [(a.address, False, skip, None) for a in accounts]
-                except Exception as exc2:
-                    skip = f"Simulation failed: {exc2} | adapt={rewrite_note}"
-                    return [(a.address, False, skip, None) for a in accounts]
-            else:
-                skip = f"Simulation reverted: {err} | adapt={rewrite_note}"
-                return [(a.address, False, skip, None) for a in accounts]
-        except Exception as exc:
-            skip = f"Simulation failed: {exc} | adapt={rewrite_note}"
-            return [(a.address, False, skip, None) for a in accounts]
+
+        # No eth_call on the live path: getPublicDrop already rejected closed
+        # windows, and an extra simulation RTT is enough for short free drops
+        # to expire. Remaining reverts (supply, per-wallet cap) surface on send.
 
         if self.settings.dry_run:
+            # One cheap sim in dry-run so Telegram reports real eligibility.
+            sim_tx: dict = {
+                "from": primary.address,
+                "to": to_addr,
+                "data": data,
+                "value": value_wei,
+                "gas": self.settings.gas_limit,
+                "chainId": self.settings.chain_id,
+                **fees,
+            }
+            try:
+                self.w3.eth.call(sim_tx)
+            except ContractLogicError as exc:
+                err = friendly_revert(exc)
+                if (
+                    seadrop_mint_public_quantity(data) > 1
+                    and "0x13da22f2" not in err.lower()
+                ):
+                    data = with_seadrop_mint_public_quantity(data, 1)
+                    sim_tx["data"] = data
+                    try:
+                        self.w3.eth.call(sim_tx)
+                        rewrite_note = f"{rewrite_note}; qty=1 retry"
+                    except ContractLogicError as exc2:
+                        err = friendly_revert(exc2)
+                        skip = f"Simulation reverted: {err} | adapt={rewrite_note}"
+                        return [(a.address, False, skip, None) for a in accounts]
+                else:
+                    skip = f"Simulation reverted: {err} | adapt={rewrite_note}"
+                    return [(a.address, False, skip, None) for a in accounts]
+            except Exception as exc:
+                skip = f"Simulation failed: {exc} | adapt={rewrite_note}"
+                return [(a.address, False, skip, None) for a in accounts]
             msg = (
                 f"DRY_RUN OK — would mint {Web3.from_wei(value_wei, 'ether')} ETH "
                 f"({rewrite_note}) [fast SeaDrop blast]"
@@ -591,8 +592,13 @@ class MintCopyService:
         _, ok, message, tx_hash = results[0]
         return ok, message, tx_hash
 
-    def seadrop_unit_price(self, nft_contract: str) -> int:
-        """Read SeaDrop getPublicDrop(nft).mintPrice (wei)."""
+    def get_public_drop(self, nft_contract: str) -> dict[str, int | bool]:
+        """
+        Decode SeaDrop getPublicDrop(nft).
+
+        ABI-encoded PublicDrop: mintPrice, startTime, endTime,
+        maxTotalMintableByWallet, feeBps, restrictFeeRecipients.
+        """
         selector = Web3.keccak(text="getPublicDrop(address)")[:4].hex()
         data = "0x" + selector + _addr_word(nft_contract)
         out = self.w3.eth.call(
@@ -600,9 +606,52 @@ class MintCopyService:
         )
         raw = out.hex() if hasattr(out, "hex") else bytes(out).hex()
         raw = raw[2:] if raw.startswith("0x") else raw
-        if len(raw) < 64:
-            return 0
-        return int(raw[:64], 16)
+        if len(raw) < 64 * 3:
+            return {
+                "mint_price": 0,
+                "start_time": 0,
+                "end_time": 0,
+                "max_per_wallet": 0,
+                "fee_bps": 0,
+                "restrict_fee_recipients": False,
+            }
+
+        def _word(i: int) -> int:
+            return int(raw[64 * i : 64 * (i + 1)], 16)
+
+        return {
+            "mint_price": _word(0),
+            "start_time": _word(1),
+            "end_time": _word(2),
+            "max_per_wallet": _word(3) if len(raw) >= 64 * 4 else 0,
+            "fee_bps": _word(4) if len(raw) >= 64 * 5 else 0,
+            "restrict_fee_recipients": bool(_word(5)) if len(raw) >= 64 * 6 else False,
+        }
+
+    def seadrop_unit_price(self, nft_contract: str) -> int:
+        """Read SeaDrop getPublicDrop(nft).mintPrice (wei)."""
+        return int(self.get_public_drop(nft_contract)["mint_price"])
+
+    @staticmethod
+    def _window_skip_message(drop: dict[str, int | bool], now: int | None = None) -> str | None:
+        """Return a skip reason if the public drop window is not active."""
+        start = int(drop.get("start_time") or 0)
+        end = int(drop.get("end_time") or 0)
+        if start <= 0 and end <= 0:
+            return None
+        if now is None:
+            now = int(time.time())
+        if now < start:
+            return (
+                f"NotActive (public drop not started yet — opens in "
+                f"{start - now}s) [0x13da22f2]"
+            )
+        if end > 0 and now >= end:
+            return (
+                f"NotActive (public drop window closed {now - end}s ago) "
+                f"[0x13da22f2]"
+            )
+        return None
 
     def _resolve_mint_value(
         self, candidate: MintCandidate, data: str
@@ -612,6 +661,7 @@ class MintCopyService:
 
         SeaDrop public drops can require mintPrice even when the watched
         wallet's tx shows value=0 (price changed, or free window ended).
+        Also skips early when getPublicDrop says the window is closed.
         """
         value = int(candidate.value_wei)
         if (
@@ -622,11 +672,16 @@ class MintCopyService:
 
         try:
             nft = seadrop_mint_public_nft(data)
-            unit = int(self.seadrop_unit_price(nft))
+            drop = self.get_public_drop(nft)
         except Exception as exc:
             log.warning("getPublicDrop failed: %s", exc)
             return value, None
 
+        window_skip = self._window_skip_message(drop)
+        if window_skip:
+            return value, f"Skipped: {window_skip}"
+
+        unit = int(drop["mint_price"])
         qty = max(seadrop_mint_public_quantity(data), 1)
         required = unit * qty
         if required <= 0:

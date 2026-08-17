@@ -83,6 +83,8 @@ def test_watcher_detects_seadrop_mint_public_without_receipt_logs():
     candidate = watcher._inspect_tx(tx, 50)
     assert candidate is not None
     assert "SeaDrop mintPublic" in candidate.method_hint
+    # SeaDrop mintPublic must not wait on receipt round-trips.
+    w3.eth.get_transaction_receipt.assert_not_called()
 
 
 def test_poll_never_skips_blocks_when_behind():

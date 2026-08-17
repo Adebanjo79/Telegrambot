@@ -178,28 +178,37 @@ class WalletWatcher:
         to_norm = _normalize_hex(to_addr)
 
         # SeaDrop calls are always mint candidates even before receipt lands.
-        if to_norm == SEADROP and selector in MINT_SELECTORS:
+        is_seadrop_mint = to_norm == SEADROP and selector in MINT_SELECTORS
+        if is_seadrop_mint:
             looks_like_mint = True
 
         tx_hash = _normalize_hex(_tx_get(tx, "hash"))
         receipt_mint = False
         receipt_error: BaseException | None = None
-        for attempt in range(3):
-            try:
-                receipt = rpc_call(lambda: self.w3.eth.get_transaction_receipt(tx_hash))
-                receipt_mint = self._receipt_shows_mint(receipt)
-                if receipt_mint:
-                    looks_like_mint = True
-                    method_hint = method_hint or "NFT mint (Transfer from 0x0)"
-                receipt_error = None
-                break
-            except Exception as exc:
-                receipt_error = exc
-                if not is_transient_rpc_error(exc):
+        # Known SeaDrop mint selectors: skip receipt round-trips so we can
+        # copy before a short public window closes.
+        if not is_seadrop_mint:
+            for attempt in range(3):
+                try:
+                    receipt = rpc_call(
+                        lambda: self.w3.eth.get_transaction_receipt(tx_hash)
+                    )
+                    receipt_mint = self._receipt_shows_mint(receipt)
+                    if receipt_mint:
+                        looks_like_mint = True
+                        method_hint = method_hint or "NFT mint (Transfer from 0x0)"
+                    receipt_error = None
                     break
-                log.warning(
-                    "Receipt fetch retry %s for %s: %s", attempt + 1, tx_hash, exc
-                )
+                except Exception as exc:
+                    receipt_error = exc
+                    if not is_transient_rpc_error(exc):
+                        break
+                    log.warning(
+                        "Receipt fetch retry %s for %s: %s",
+                        attempt + 1,
+                        tx_hash,
+                        exc,
+                    )
 
         if receipt_error is not None:
             # If we already know it's a mint selector / SeaDrop, still copy it.

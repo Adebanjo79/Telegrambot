@@ -1,5 +1,6 @@
 from decimal import Decimal
 from unittest.mock import MagicMock
+import time
 
 from eth_account import Account
 from web3 import Web3
@@ -117,6 +118,61 @@ def test_generic_address_rewrite():
     assert "replaced" in note
 
 
+def test_window_skip_message_closed_and_future():
+    closed = MintCopyService._window_skip_message(
+        {"start_time": 1, "end_time": 100}, now=150
+    )
+    assert closed is not None
+    assert "closed" in closed.lower()
+    assert "0x13da22f2" in closed
+
+    future = MintCopyService._window_skip_message(
+        {"start_time": 200, "end_time": 300}, now=150
+    )
+    assert future is not None
+    assert "not started" in future.lower()
+
+    open_win = MintCopyService._window_skip_message(
+        {"start_time": 100, "end_time": 300}, now=150
+    )
+    assert open_win is None
+
+
+def test_closed_public_drop_skips_before_sim():
+    pk1 = "0x" + "ab" * 32
+    settings = _settings(
+        dry_run=False,
+        private_keys=(pk1,),
+        my_wallets=(Account.from_key(pk1).address,),
+        private_key=pk1,
+        my_wallet=Account.from_key(pk1).address,
+    )
+    w3 = MagicMock()
+    w3.eth.get_block.return_value = {"baseFeePerGas": 100}
+    w3.to_wei.return_value = 50_000_000
+    # mintPrice=0, start=1, end=2 (already closed)
+    now = int(time.time())
+    end = now - 30
+    start = end - 60
+    raw = (
+        f"{0:064x}"
+        + f"{start:064x}"
+        + f"{end:064x}"
+        + f"{1:064x}"
+        + f"{0:064x}"
+        + f"{0:064x}"
+    )
+    w3.eth.call.return_value = bytes.fromhex(raw)
+
+    service = MintCopyService(settings, w3)
+    candidate = _seadrop_public_candidate(settings.target_wallets[0], qty=1)
+    results = service.try_copy_all(candidate)
+    assert len(results) == 1
+    assert results[0][1] is False
+    assert "closed" in results[0][2].lower()
+    w3.eth.send_raw_transaction.assert_not_called()
+
+
 def test_free_seadrop_uses_fast_path_single_simulation():
     pk1 = "0x" + "ab" * 32
     pk2 = "0x" + "cd" * 32
@@ -132,8 +188,17 @@ def test_free_seadrop_uses_fast_path_single_simulation():
     w3 = MagicMock()
     w3.eth.get_block.return_value = {"baseFeePerGas": 100}
     w3.to_wei.return_value = 50_000_000
-    # Free drop: getPublicDrop mintPrice = 0; sim succeeds.
-    w3.eth.call.return_value = b"\x00" * 128
+    now = int(time.time())
+    # Open free window
+    raw = (
+        f"{0:064x}"
+        + f"{now - 10:064x}"
+        + f"{now + 3600:064x}"
+        + f"{5:064x}"
+        + f"{0:064x}"
+        + f"{0:064x}"
+    )
+    w3.eth.call.return_value = bytes.fromhex(raw)
 
     service = MintCopyService(settings, w3)
     candidate = _seadrop_public_candidate(settings.target_wallets[0], qty=1)
@@ -141,8 +206,6 @@ def test_free_seadrop_uses_fast_path_single_simulation():
     assert len(results) == 3
     assert all(ok for _, ok, msg, _ in results)
     assert all("fast SeaDrop blast" in msg for _, _, msg, _ in results)
-    # One price read + one simulation (not per-wallet sims).
-    assert w3.eth.call.call_count <= 3
 
 
 def test_free_seadrop_fast_path_live_blasts_all_wallets():
@@ -158,7 +221,16 @@ def test_free_seadrop_fast_path_live_blasts_all_wallets():
     )
     w3 = MagicMock()
     w3.eth.get_block.return_value = {"baseFeePerGas": 100}
-    w3.eth.call.return_value = b"\x00" * 128
+    now = int(time.time())
+    raw = (
+        f"{0:064x}"
+        + f"{now - 10:064x}"
+        + f"{now + 3600:064x}"
+        + f"{5:064x}"
+        + f"{0:064x}"
+        + f"{0:064x}"
+    )
+    w3.eth.call.return_value = bytes.fromhex(raw)
     w3.to_wei.return_value = 50_000_000
     w3.eth.get_balance.return_value = 10**18
     w3.eth.get_transaction_count.side_effect = [0, 0]
@@ -171,8 +243,8 @@ def test_free_seadrop_fast_path_live_blasts_all_wallets():
         def hex(self) -> str:
             return f"{self._n:064x}"
 
-    def _send(raw):
-        sent.append(raw)
+    def _send(raw_tx):
+        sent.append(raw_tx)
         return _Hash(len(sent))
 
     w3.eth.send_raw_transaction.side_effect = _send

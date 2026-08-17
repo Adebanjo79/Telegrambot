@@ -117,7 +117,9 @@ async def handle_candidate(
     if mint_copy.already_copied(candidate.source_tx_hash):
         return
 
-    await tracker.notify(
+    # Fire the "seen it" alert without waiting — Telegram latency used to
+    # delay the actual copy long enough for short SeaDrop windows to close.
+    detect_msg = (
         "👀 Target mint activity\n"
         f"From: {candidate.target_wallet}\n"
         f"Block: {candidate.block_number}\n"
@@ -128,8 +130,13 @@ async def handle_candidate(
         f"Minting wallets: {len(mint_copy.my_wallets)} (parallel)\n"
         f"{'Simulating (DRY_RUN)…' if settings.dry_run else 'Copying…'}"
     )
+    detect_task = asyncio.create_task(tracker.notify(detect_msg))
 
     results = await asyncio.to_thread(mint_copy.try_copy_all, candidate)
+    try:
+        await detect_task
+    except Exception:
+        log.exception("Failed notifying mint detection")
     ok_n = sum(1 for _, ok, _, _ in results if ok)
     fail_n = len(results) - ok_n
     lines = [
