@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 import sys
 
 from web3 import Web3
@@ -23,6 +24,20 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("main")
+
+
+def code_version() -> str:
+    """Short git SHA so Telegram online message proves which build is running."""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+        return out.strip() or "unknown"
+    except Exception:
+        return "unknown"
 
 
 def build_web3(
