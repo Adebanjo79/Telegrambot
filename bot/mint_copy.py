@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
@@ -176,6 +177,12 @@ class MintCopyService:
         self.store_path = DEFAULT_STORE
         self._copied: set[str] = set()
         self._collection_names: dict[str, str] = {}
+        # address -> (balance wei, next pending nonce, refreshed monotonic time)
+        self._wallet_state: dict[str, tuple[int, int, float]] = {}
+        # Accepted transactions may not immediately appear on every
+        # load-balanced RPC. Keep a temporary local nonce floor.
+        self._nonce_floor: dict[str, tuple[int, float]] = {}
+        self._wallet_state_lock = threading.Lock()
         self.reload_accounts()
 
     def reload_accounts(self) -> None:
@@ -240,6 +247,61 @@ class MintCopyService:
     @property
     def my_wallets(self) -> list[str]:
         return [a.address for a in self.accounts]
+
+    def refresh_wallet_state(self, wallet: str | None = None) -> None:
+        """
+        Refresh balance + pending nonce outside the critical mint path.
+
+        When wallet is omitted this warms every configured wallet at startup.
+        The background loop refreshes one wallet at a time so it doesn't
+        reserve a large burst of rate-limiter slots ahead of a mint.
+        """
+        wallets = [wallet] if wallet else self.my_wallets
+        for address in wallets:
+            checksum = Web3.to_checksum_address(address)
+            balance = int(self.w3.eth.get_balance(checksum))
+            nonce = int(self.w3.eth.get_transaction_count(checksum, "pending"))
+            now = time.monotonic()
+            with self._wallet_state_lock:
+                floor = self._nonce_floor.get(checksum.lower())
+                if floor and now < floor[1]:
+                    nonce = max(nonce, floor[0])
+                elif floor:
+                    self._nonce_floor.pop(checksum.lower(), None)
+                self._wallet_state[checksum.lower()] = (
+                    balance,
+                    nonce,
+                    now,
+                )
+
+    def wallet_state(self, wallet: str) -> tuple[int, int]:
+        """Use fresh cached state, falling back to an immediate RPC refresh."""
+        key = wallet.lower()
+        with self._wallet_state_lock:
+            cached = self._wallet_state.get(key)
+        if cached and time.monotonic() - cached[2] <= self.settings.wallet_state_ttl_sec:
+            return cached[0], cached[1]
+
+        self.refresh_wallet_state(wallet)
+        with self._wallet_state_lock:
+            balance, nonce, _ = self._wallet_state[key]
+        return balance, nonce
+
+    def consume_wallet_state(self, wallet: str, estimated_cost: int) -> None:
+        """Advance cached nonce after a transaction is accepted by the RPC."""
+        key = wallet.lower()
+        with self._wallet_state_lock:
+            cached = self._wallet_state.get(key)
+            if not cached:
+                return
+            balance, nonce, _ = cached
+            next_nonce = nonce + 1
+            self._wallet_state[key] = (
+                max(0, balance - int(estimated_cost)),
+                next_nonce,
+                time.monotonic(),
+            )
+            self._nonce_floor[key] = (next_nonce, time.monotonic() + 120.0)
 
     def collection_info(self, candidate: MintCandidate) -> tuple[str, str]:
         """
@@ -523,8 +585,8 @@ class MintCopyService:
         need = self.settings.gas_limit * fee_cap + int(value_wei)
         n = len(accounts)
         results: list[tuple[str, bool, str, str | None] | None] = [None] * n
-        # Prefetch phase: parallel balance+nonce (still paced by provider).
-        # Broadcast phase: all wallets at once — window is the bottleneck.
+        # Cached balance+nonce means prep is normally local-only. Broadcast
+        # remains all-at-once because the public window is the bottleneck.
         workers = min(n, 15)
         window_closed = False
 
@@ -541,7 +603,7 @@ class MintCopyService:
                 )
                 return None
             try:
-                bal = int(self.w3.eth.get_balance(wallet))
+                bal, nonce = self.wallet_state(wallet)
                 if bal < need:
                     results[i] = (
                         wallet,
@@ -554,7 +616,6 @@ class MintCopyService:
                         None,
                     )
                     return None
-                nonce = self.w3.eth.get_transaction_count(wallet, "pending")
                 tx = {
                     "from": wallet,
                     "to": to_addr,
@@ -600,6 +661,7 @@ class MintCopyService:
                     f"Copy mint submitted ({rewrite_note}) [fast].",
                     hex_hash,
                 )
+                self.consume_wallet_state(wallet, need)
             except Exception as exc:
                 text = str(exc).lower()
                 if "0x13da22f2" in text or "notactive" in text:
@@ -854,9 +916,9 @@ class MintCopyService:
                 )
                 need = self.settings.gas_limit * fee_cap + int(attempt_value)
                 try:
-                    bal = int(self.w3.eth.get_balance(my_wallet))
+                    bal, nonce = self.wallet_state(my_wallet)
                 except Exception as exc:
-                    return False, f"Balance check failed: {exc}", None
+                    return False, f"Wallet state check failed: {exc}", None
                 if bal < need:
                     have_eth = Web3.from_wei(bal, "ether")
                     need_eth = Web3.from_wei(need, "ether")
@@ -866,13 +928,14 @@ class MintCopyService:
                         None,
                     )
 
-                tx["nonce"] = self.w3.eth.get_transaction_count(my_wallet, "pending")
+                tx["nonce"] = nonce
                 signed = account.sign_transaction(tx)
                 raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
                 tx_hash = self.w3.eth.send_raw_transaction(raw)
                 hex_hash = tx_hash.hex()
                 if not hex_hash.startswith("0x"):
                     hex_hash = "0x" + hex_hash
+                self.consume_wallet_state(my_wallet, need)
                 return True, f"Copy mint submitted ({qty_note}).", hex_hash
 
             return False, f"Simulation reverted: {last_err}", None

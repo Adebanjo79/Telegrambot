@@ -78,6 +78,13 @@ def _tx_get(tx: Any, key: str, default: Any = None) -> Any:
         return getattr(tx, key, default)
 
 
+def _quantity_int(value: Any) -> int:
+    """Decode Web3 ints and raw JSON-RPC hex quantities."""
+    if isinstance(value, str):
+        return int(value, 0)
+    return int(value or 0)
+
+
 class WalletWatcher:
     """Poll Robinhood Chain for mint-like txs from watched wallets."""
 
@@ -149,7 +156,13 @@ class WalletWatcher:
         self.last_block = last_ok
         return found
 
-    def _inspect_tx(self, tx: Any, block_number: int) -> MintCandidate | None:
+    def inspect_pending(self, tx: Any) -> MintCandidate | None:
+        """Inspect a full pending transaction without waiting for a receipt."""
+        return self._inspect_tx(tx, block_number=0, pending=True)
+
+    def _inspect_tx(
+        self, tx: Any, block_number: int, pending: bool = False
+    ) -> MintCandidate | None:
         tx_from = _normalize_hex(_tx_get(tx, "from"))
         if tx_from not in self.target_set:
             return None
@@ -162,7 +175,7 @@ class WalletWatcher:
         if input_data in {"0x", "0x0", ""}:
             return None
 
-        value_wei = int(_tx_get(tx, "value") or 0)
+        value_wei = _quantity_int(_tx_get(tx, "value"))
         value_eth = Decimal(value_wei) / Decimal(10**18)
         if self.settings.free_mints_only and value_wei > 0:
             log.info(
@@ -187,7 +200,7 @@ class WalletWatcher:
         receipt_error: BaseException | None = None
         # Known SeaDrop mint selectors: skip receipt round-trips so we can
         # copy before a short public window closes.
-        if not is_seadrop_mint:
+        if not is_seadrop_mint and not pending:
             for attempt in range(3):
                 try:
                     receipt = rpc_call(

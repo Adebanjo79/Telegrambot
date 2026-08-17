@@ -90,6 +90,34 @@ python main.py
 | `RPC_RATE_LIMIT` | Your plan's requests/second cap (default `25`) |
 | `RPC_WARN_PERCENT` | Warn once usage passes this share of the cap (default `80`) |
 | `RPC_SLOW_MS` | Warn when average response time exceeds this (default `1500`) |
+| `PENDING_DETECTION` | `true` = watch the mempool before block confirmation (advanced; default `false`) |
+| `PENDING_WS_URL` | WebSocket RPC (`wss://...`) with full pending transactions |
+| `PENDING_SUBSCRIPTION` | `auto`, `alchemy`, or `full`; default `auto` |
+| `WALLET_STATE_REFRESH_SEC` | Refresh cached balances/nonces every cycle (default `5`) |
+| `WALLET_STATE_TTL_SEC` | Fall back to live state after this age (default `15`) |
+
+### Faster pending detection (advanced)
+
+Pending detection can see a target mint before it reaches a block. For an
+Alchemy Robinhood endpoint:
+
+```env
+PENDING_DETECTION=true
+PENDING_WS_URL=wss://robinhood-mainnet.g.alchemy.com/v2/YOUR_KEY
+PENDING_SUBSCRIPTION=auto
+```
+
+Alchemy mode filters by `TARGET_WALLETS` on the server, so the bot does not
+download every pending transaction. Other providers must support full
+transactions from `eth_subscribe("newPendingTransactions", true)`.
+
+**Risk:** pending transactions are not final. A target transaction can be
+replaced, dropped, or revert after the bot has already broadcast, costing gas.
+Keep `PENDING_DETECTION=false` if avoiding that risk matters more than speed.
+
+The wallet-state cache is enabled automatically. It refreshes balances and
+pending nonces before a mint appears, removing those RPC calls from the
+critical free-mint blast path.
 
 ## RPC alerts
 

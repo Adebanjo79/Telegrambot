@@ -143,6 +143,26 @@ def test_collection_info_reads_seadrop_nft_name_and_caches_it():
     assert w3.eth.call.call_count == 1
 
 
+def test_wallet_state_cache_avoids_critical_path_rpc_and_advances_nonce():
+    settings = _settings(wallet_state_ttl_sec=15.0)
+    w3 = MagicMock()
+    w3.eth.get_balance.return_value = 10**18
+    w3.eth.get_transaction_count.return_value = 7
+    service = MintCopyService(settings, w3)
+    wallet = service.my_wallet
+
+    service.refresh_wallet_state(wallet)
+    assert service.wallet_state(wallet) == (10**18, 7)
+    w3.eth.get_balance.assert_called_once()
+    w3.eth.get_transaction_count.assert_called_once()
+
+    service.consume_wallet_state(wallet, 123)
+    assert service.wallet_state(wallet) == (10**18 - 123, 8)
+    # Reading/consuming fresh state did not perform another RPC.
+    w3.eth.get_balance.assert_called_once()
+    w3.eth.get_transaction_count.assert_called_once()
+
+
 def test_window_skip_message_closed_and_future():
     closed = MintCopyService._window_skip_message(
         {"start_time": 1, "end_time": 100}, now=150

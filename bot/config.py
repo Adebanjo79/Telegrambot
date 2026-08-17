@@ -75,6 +75,11 @@ class Settings:
     rpc_slow_ms: float
     rpc_load_balance: bool
     rpc_failback_sec: float
+    pending_detection: bool = False
+    pending_ws_url: str = ""
+    pending_subscription: str = "auto"
+    wallet_state_refresh_sec: float = 5.0
+    wallet_state_ttl_sec: float = 15.0
 
     @classmethod
     def load(cls, env_file: str | None = ".env") -> "Settings":
@@ -131,6 +136,22 @@ class Settings:
         if not rpc_urls:
             raise ValueError("RPC_URL/RPC_URLS must contain at least one endpoint")
 
+        pending_detection = _parse_bool(
+            _opt("PENDING_DETECTION", "false"), False
+        )
+        pending_ws_url = _opt("PENDING_WS_URL", "")
+        if pending_detection and not pending_ws_url:
+            raise ValueError(
+                "PENDING_DETECTION=true requires PENDING_WS_URL=wss://..."
+            )
+        if pending_ws_url and not pending_ws_url.startswith(("ws://", "wss://")):
+            raise ValueError("PENDING_WS_URL must start with ws:// or wss://")
+        pending_subscription = _opt("PENDING_SUBSCRIPTION", "auto").lower()
+        if pending_subscription not in {"auto", "alchemy", "full"}:
+            raise ValueError(
+                "PENDING_SUBSCRIPTION must be auto, alchemy, or full"
+            )
+
         return cls(
             telegram_bot_token=_req("TELEGRAM_BOT_TOKEN"),
             telegram_owner_id=owner_id,
@@ -159,4 +180,13 @@ class Settings:
             rpc_load_balance=_parse_bool(_opt("RPC_LOAD_BALANCE", "true"), True),
             # After this many seconds on a backup, probe the primary and return.
             rpc_failback_sec=float(_opt("RPC_FAILBACK_SEC", "30")),
+            pending_detection=pending_detection,
+            pending_ws_url=pending_ws_url,
+            pending_subscription=pending_subscription,
+            wallet_state_refresh_sec=max(
+                1.0, float(_opt("WALLET_STATE_REFRESH_SEC", "5"))
+            ),
+            wallet_state_ttl_sec=max(
+                2.0, float(_opt("WALLET_STATE_TTL_SEC", "15"))
+            ),
         )

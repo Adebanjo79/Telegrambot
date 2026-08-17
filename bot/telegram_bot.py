@@ -131,6 +131,10 @@ class TelegramTracker:
             f"Primary wallet: {self.mint_copy.my_wallet}\n"
             f"Last block: {self.watcher.last_block}\n"
             f"Catch-up lag: {getattr(self.watcher, 'lag_blocks', 0)} blocks\n"
+            f"Pending detection: "
+            f"{'ON' if self.settings.pending_detection else 'OFF'}\n"
+            f"Wallet cache refresh: "
+            f"{self.settings.wallet_state_refresh_sec:g}s\n"
             f"Free mints only: {self.settings.free_mints_only}\n"
             f"Targets: {len(self.settings.target_wallets)}"
         )

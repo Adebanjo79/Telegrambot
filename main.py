@@ -9,6 +9,7 @@ from web3 import Web3
 
 from bot.config import Settings
 from bot.mint_copy import MintCopyService
+from bot.pending_watcher import PendingWalletWatcher
 from bot.provider import FailoverHTTPProvider
 from bot.version import BOT_VERSION
 from bot.rpc import (
@@ -149,12 +150,17 @@ async def handle_candidate(
         collection_address = candidate.contract_address
 
     # Fire the "seen it" alert without waiting for Telegram's response.
+    block_label = (
+        "pending (mempool)"
+        if candidate.block_number <= 0
+        else str(candidate.block_number)
+    )
     detect_msg = (
         "👀 Target mint activity\n"
         f"Collection: {collection_name}\n"
         f"Collection contract: {collection_address}\n"
         f"From: {candidate.target_wallet}\n"
-        f"Block: {candidate.block_number}\n"
+        f"Block: {block_label}\n"
         f"Mint contract: {candidate.contract_address}\n"
         f"Value: {candidate.value_eth} ETH\n"
         f"Hint: {candidate.method_hint}\n"
@@ -261,6 +267,45 @@ async def mint_worker(
                 pass
         finally:
             queue.task_done()
+
+
+async def wallet_state_loop(mint_copy: MintCopyService) -> None:
+    """Continuously pre-cache one wallet at a time without creating RPC bursts."""
+    while True:
+        wallets = list(mint_copy.my_wallets)
+        if not wallets:
+            await asyncio.sleep(1)
+            continue
+        spacing = max(
+            0.2,
+            mint_copy.settings.wallet_state_refresh_sec / len(wallets),
+        )
+        for wallet in wallets:
+            try:
+                await asyncio.to_thread(mint_copy.refresh_wallet_state, wallet)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Wallet state refresh failed for %s", wallet)
+            await asyncio.sleep(spacing)
+
+
+async def pending_watch_loop(
+    pending_watcher: PendingWalletWatcher,
+    watcher: WalletWatcher,
+    mint_copy: MintCopyService,
+    mint_queue: asyncio.Queue,
+) -> None:
+    """Queue target mints seen in the mempool before block confirmation."""
+
+    async def _queue(candidate) -> None:
+        if not watcher.enabled:
+            return
+        if mint_copy.already_copied(candidate.source_tx_hash):
+            return
+        await mint_queue.put(candidate)
+
+    await pending_watcher.run(_queue)
 
 
 async def watch_loop(
@@ -431,6 +476,13 @@ async def async_main() -> int:
     mint_copy = MintCopyService(settings, w3)
     watcher = WalletWatcher(settings, w3)
     head = watcher.bootstrap()
+    # Warm all wallets before watching starts. Normal mint prep then performs
+    # no balance/nonce RPC calls.
+    try:
+        await asyncio.to_thread(mint_copy.refresh_wallet_state)
+    except Exception:
+        log.exception("Initial wallet state warmup failed; live fallback remains enabled")
+    pending_watcher = PendingWalletWatcher(settings, watcher)
     tracker = TelegramTracker(settings, watcher, mint_copy)
 
     mode = "DRY_RUN" if settings.dry_run else "LIVE"
@@ -462,18 +514,32 @@ async def async_main() -> int:
             f"{' (auto failover)' if len(settings.rpc_urls) > 1 else ''}\n"
             f"RPC alerts at {settings.rpc_warn_percent:.0f}% of "
             f"{settings.rpc_rate_limit:.0f} req/s\n"
+            f"Pending detection: {'ON' if settings.pending_detection else 'OFF'}\n"
+            f"Wallet state cache: {settings.wallet_state_refresh_sec:g}s refresh\n"
             f"Free mints only: {settings.free_mints_only}\n"
             f"Starting at block {head}"
         )
 
         watch_task = None
         worker_task = None
+        cache_task = None
+        pending_task = None
         mint_queue: asyncio.Queue = asyncio.Queue()
         state = {"rpc_was_full": False, "last_capacity_alert": 0.0}
         try:
             worker_task = asyncio.create_task(
                 mint_worker(mint_queue, tracker, mint_copy, state)
             )
+            cache_task = asyncio.create_task(wallet_state_loop(mint_copy))
+            if settings.pending_detection:
+                pending_task = asyncio.create_task(
+                    pending_watch_loop(
+                        pending_watcher,
+                        watcher,
+                        mint_copy,
+                        mint_queue,
+                    )
+                )
             watch_task = asyncio.create_task(
                 watch_loop(tracker, watcher, mint_copy, mint_queue, state)
             )
@@ -481,7 +547,7 @@ async def async_main() -> int:
         except asyncio.CancelledError:
             pass
         finally:
-            for task in (watch_task, worker_task):
+            for task in (watch_task, worker_task, cache_task, pending_task):
                 if task is not None and not task.done():
                     task.cancel()
                     try:
