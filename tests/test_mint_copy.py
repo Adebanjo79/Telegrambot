@@ -118,6 +118,31 @@ def test_generic_address_rewrite():
     assert "replaced" in note
 
 
+def test_collection_info_reads_seadrop_nft_name_and_caches_it():
+    settings = _settings()
+    w3 = MagicMock()
+    name = b"Fast Free Mint"
+    padded = name + b"\x00" * ((32 - len(name) % 32) % 32)
+    w3.eth.call.return_value = (
+        (32).to_bytes(32, "big") + len(name).to_bytes(32, "big") + padded
+    )
+    service = MintCopyService(settings, w3)
+    candidate = _seadrop_public_candidate(settings.target_wallets[0])
+
+    collection_name, collection = service.collection_info(candidate)
+    assert collection_name == "Fast Free Mint"
+    assert collection == Web3.to_checksum_address(
+        "0xcc69a57113ab3b9822a3b202d704611971ece5c7"
+    )
+    w3.eth.call.assert_called_once_with(
+        {"to": collection, "data": "0x06fdde03"}
+    )
+
+    # The next Telegram message for the same collection does not spend RPC.
+    assert service.collection_info(candidate) == (collection_name, collection)
+    assert w3.eth.call.call_count == 1
+
+
 def test_window_skip_message_closed_and_future():
     closed = MintCopyService._window_skip_message(
         {"start_time": 1, "end_time": 100}, now=150

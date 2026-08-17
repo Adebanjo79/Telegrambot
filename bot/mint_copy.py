@@ -83,6 +83,12 @@ def seadrop_mint_public_quantity(data: str) -> int:
 
 def seadrop_mint_public_nft(data: str) -> str:
     data = normalize_seadrop_mint_public(data)
+    return seadrop_nft_contract(data)
+
+
+def seadrop_nft_contract(data: str) -> str:
+    """Return SeaDrop's first calldata argument (the NFT contract)."""
+    data = _ensure_hex(data)
     if len(data) < 10 + 64:
         return ""
     return Web3.to_checksum_address("0x" + data[10 + 24 : 10 + 64])
@@ -169,6 +175,7 @@ class MintCopyService:
         self.w3 = w3
         self.store_path = DEFAULT_STORE
         self._copied: set[str] = set()
+        self._collection_names: dict[str, str] = {}
         self.reload_accounts()
 
     def reload_accounts(self) -> None:
@@ -233,6 +240,56 @@ class MintCopyService:
     @property
     def my_wallets(self) -> list[str]:
         return [a.address for a in self.accounts]
+
+    def collection_info(self, candidate: MintCandidate) -> tuple[str, str]:
+        """
+        Return (collection name, NFT contract) for Telegram.
+
+        SeaDrop is only the mint router, so its first calldata argument is the
+        actual NFT collection. Direct mints use the transaction destination.
+        """
+        collection = candidate.contract_address
+        if candidate.contract_address.lower() == SEADROP:
+            try:
+                decoded = seadrop_nft_contract(candidate.input_data)
+                if decoded:
+                    collection = decoded
+            except (ValueError, TypeError):
+                pass
+
+        collection = Web3.to_checksum_address(collection)
+        cached = self._collection_names.get(collection.lower())
+        if cached:
+            return cached, collection
+
+        try:
+            out = self.w3.eth.call({"to": collection, "data": "0x06fdde03"})
+            raw = bytes(out)
+            name = ""
+
+            # Standard ABI string: offset, then length + UTF-8 bytes.
+            if len(raw) >= 64:
+                offset = int.from_bytes(raw[:32], "big")
+                if 0 < offset and offset + 32 <= len(raw):
+                    length = int.from_bytes(raw[offset : offset + 32], "big")
+                    end = offset + 32 + length
+                    if length <= 512 and end <= len(raw):
+                        name = raw[offset + 32 : end].decode(
+                            "utf-8", errors="replace"
+                        )
+
+            # Some older NFT contracts return bytes32 from name().
+            if not name and len(raw) >= 32:
+                name = raw[:32].rstrip(b"\x00").decode("utf-8", errors="replace")
+
+            name = "".join(c for c in name.strip() if c.isprintable())[:120]
+            if name:
+                self._collection_names[collection.lower()] = name
+                return name, collection
+        except Exception as exc:
+            log.info("Collection name lookup failed for %s: %s", collection, exc)
+
+        return "Unknown collection", collection
 
     def already_copied(self, source_tx_hash: str) -> bool:
         return source_tx_hash.lower() in self._copied

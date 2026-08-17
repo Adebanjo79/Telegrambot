@@ -134,13 +134,28 @@ async def handle_candidate(
     if mint_copy.already_copied(candidate.source_tx_hash):
         return
 
-    # Fire the "seen it" alert without waiting — Telegram latency used to
-    # delay the actual copy long enough for short SeaDrop windows to close.
+    # Start copying before collection metadata or Telegram. Neither should
+    # delay a short SeaDrop window.
+    copy_task = asyncio.create_task(
+        asyncio.to_thread(mint_copy.try_copy_all, candidate)
+    )
+    try:
+        collection_name, collection_address = await asyncio.wait_for(
+            asyncio.to_thread(mint_copy.collection_info, candidate),
+            timeout=3.0,
+        )
+    except Exception:
+        collection_name = "Unknown collection"
+        collection_address = candidate.contract_address
+
+    # Fire the "seen it" alert without waiting for Telegram's response.
     detect_msg = (
         "👀 Target mint activity\n"
+        f"Collection: {collection_name}\n"
+        f"Collection contract: {collection_address}\n"
         f"From: {candidate.target_wallet}\n"
         f"Block: {candidate.block_number}\n"
-        f"Contract: {candidate.contract_address}\n"
+        f"Mint contract: {candidate.contract_address}\n"
         f"Value: {candidate.value_eth} ETH\n"
         f"Hint: {candidate.method_hint}\n"
         f"Source: {tracker.explorer_tx(candidate.source_tx_hash)}\n"
@@ -149,7 +164,7 @@ async def handle_candidate(
     )
     detect_task = asyncio.create_task(tracker.notify(detect_msg))
 
-    results = await asyncio.to_thread(mint_copy.try_copy_all, candidate)
+    results = await copy_task
     try:
         await detect_task
     except Exception:
@@ -158,7 +173,9 @@ async def handle_candidate(
     fail_n = len(results) - ok_n
     lines = [
         f"Done for this mint: {ok_n} ok, {fail_n} failed "
-        f"(tried {len(results)} wallets)."
+        f"(tried {len(results)} wallets).\n"
+        f"Collection: {collection_name}\n"
+        f"Collection contract: {collection_address}"
     ]
     fail_msgs = {msg for _, ok, msg, _ in results if not ok}
     if ok_n == 0 and len(fail_msgs) == 1:
