@@ -10,6 +10,7 @@ from web3 import Web3
 from bot.config import Settings
 from bot.mint_copy import MintCopyService
 from bot.provider import FailoverHTTPProvider
+from bot.version import BOT_VERSION
 from bot.rpc import (
     is_rpc_capacity_error,
     is_transient_rpc_error,
@@ -27,7 +28,7 @@ log = logging.getLogger("main")
 
 
 def code_version() -> str:
-    """Short git SHA so Telegram online message proves which build is running."""
+    """Pinned version + git SHA so Telegram proves which code is running."""
     try:
         out = subprocess.check_output(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -35,9 +36,10 @@ def code_version() -> str:
             text=True,
             timeout=2,
         )
-        return out.strip() or "unknown"
+        sha = out.strip() or "unknown"
     except Exception:
-        return "unknown"
+        sha = "unknown"
+    return f"{BOT_VERSION} ({sha})"
 
 
 def build_web3(
@@ -433,6 +435,7 @@ async def async_main() -> int:
         file_n = max(0, total_n - env_n)
         await tracker.notify(
             f"🟢 NFT copy bot online ({mode})\n"
+            f"Build: {code_version()}\n"
             f"Robinhood Chain id {settings.chain_id}\n"
             f"Targets: {len(settings.target_wallets)}\n"
             f"Minting wallets: {total_n} "

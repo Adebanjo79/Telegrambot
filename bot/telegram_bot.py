@@ -8,6 +8,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from bot.config import Settings
 from bot.mint_copy import MintCopyService
+from bot.version import BOT_VERSION
 from bot.watcher import WalletWatcher
 
 log = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ class TelegramTracker:
             return
         await update.message.reply_text(
             "Robinhood Chain NFT copy bot\n\n"
-            "/status — watcher + wallets\n"
+            "/status — watcher + wallets + build\n"
             "/targets — wallets being copied\n"
             "/wallets — your minting wallets\n"
             "/addwallet <private_key> — add minting wallet\n"
@@ -118,6 +119,7 @@ class TelegramTracker:
         if self.rpc_last_error:
             rpc_line += f"\nRPC last error: {self.rpc_last_error}"
         await update.message.reply_text(
+            f"Build: {BOT_VERSION}\n"
             f"Enabled: {self.watcher.enabled}\n"
             f"Mode: {mode}\n"
             f"Network: Robinhood Chain ({self.settings.chain_id})\n"

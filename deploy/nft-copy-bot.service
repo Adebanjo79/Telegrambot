@@ -5,10 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/robinhood-nft-copy-bot
+# If Telegram online alerts have no "Build:" line, systemd is starting
+# a different folder than the one you git pull. These paths must match.
+User=root
+WorkingDirectory=/root/robinhood-nft-copy-bot
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/ubuntu/robinhood-nft-copy-bot/.venv/bin/python main.py
+ExecStart=/root/robinhood-nft-copy-bot/.venv/bin/python main.py
 Restart=always
 RestartSec=5
 
