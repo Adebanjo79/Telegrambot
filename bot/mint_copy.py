@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -47,6 +48,11 @@ PAID_MINT_SELECTORS = (
     "0xcd1c8867",
     "0xfb8f41b2",
     "0xe450d38c",
+)
+
+_NONCE_STATE_PATTERNS = (
+    re.compile(r"\bstate:\s*(\d+)", re.IGNORECASE),
+    re.compile(r"\baccount has nonce of:\s*(\d+)", re.IGNORECASE),
 )
 
 
@@ -168,6 +174,16 @@ def friendly_revert(exc: BaseException) -> str:
     return text
 
 
+def nonce_required_by_error(exc: BaseException) -> int:
+    """Extract the chain's next nonce from common `nonce too low` errors."""
+    text = str(exc)
+    for pattern in _NONCE_STATE_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return int(match.group(1))
+    return 0
+
+
 class MintCopyService:
     """Simulate then (optionally) broadcast copy mints from one or more wallets."""
 
@@ -285,6 +301,21 @@ class MintCopyService:
         self.refresh_wallet_state(wallet)
         with self._wallet_state_lock:
             balance, nonce, _ = self._wallet_state[key]
+        return balance, nonce
+
+    def force_wallet_state(
+        self, wallet: str, minimum_nonce: int = 0
+    ) -> tuple[int, int]:
+        """Discard stale cache and read state again after a nonce rejection."""
+        key = wallet.lower()
+        with self._wallet_state_lock:
+            self._wallet_state.pop(key, None)
+            self._nonce_floor.pop(key, None)
+        self.refresh_wallet_state(wallet)
+        with self._wallet_state_lock:
+            balance, nonce, refreshed = self._wallet_state[key]
+            nonce = max(nonce, int(minimum_nonce))
+            self._wallet_state[key] = (balance, nonce, refreshed)
         return balance, nonce
 
     def consume_wallet_state(self, wallet: str, estimated_cost: int) -> None:
@@ -590,6 +621,20 @@ class MintCopyService:
         workers = min(n, 15)
         window_closed = False
 
+        def _sign(account: LocalAccount, nonce: int):
+            tx = {
+                "from": account.address,
+                "to": to_addr,
+                "data": data,
+                "value": value_wei,
+                "gas": self.settings.gas_limit,
+                "chainId": self.settings.chain_id,
+                "nonce": nonce,
+                **fees,
+            }
+            signed = account.sign_transaction(tx)
+            return getattr(signed, "raw_transaction", None) or signed.rawTransaction
+
         def _prep(account: LocalAccount, i: int) -> bytes | None:
             """Return signed raw tx bytes, or set results[i] on skip/fail."""
             nonlocal window_closed
@@ -616,18 +661,7 @@ class MintCopyService:
                         None,
                     )
                     return None
-                tx = {
-                    "from": wallet,
-                    "to": to_addr,
-                    "data": data,
-                    "value": value_wei,
-                    "gas": self.settings.gas_limit,
-                    "chainId": self.settings.chain_id,
-                    "nonce": nonce,
-                    **fees,
-                }
-                signed = account.sign_transaction(tx)
-                return getattr(signed, "raw_transaction", None) or signed.rawTransaction
+                return _sign(account, nonce)
             except Exception as exc:
                 results[i] = (wallet, False, f"Prep failed: {exc}", None)
                 log.warning("Fast SeaDrop prep failed for %s: %s", wallet, exc)
@@ -664,6 +698,40 @@ class MintCopyService:
                 self.consume_wallet_state(wallet, need)
             except Exception as exc:
                 text = str(exc).lower()
+                if "nonce too low" in text:
+                    try:
+                        required_nonce = nonce_required_by_error(exc)
+                        bal, fresh_nonce = self.force_wallet_state(
+                            wallet, required_nonce
+                        )
+                        if bal < need:
+                            raise RuntimeError(
+                                "insufficient ETH after nonce refresh"
+                            )
+                        retry_raw = _sign(account, fresh_nonce)
+                        tx_hash = self.w3.eth.send_raw_transaction(retry_raw)
+                        hex_hash = tx_hash.hex()
+                        if not hex_hash.startswith("0x"):
+                            hex_hash = "0x" + hex_hash
+                        results[i] = (
+                            wallet,
+                            True,
+                            (
+                                f"Copy mint submitted ({rewrite_note}) "
+                                "[fast; nonce refreshed]."
+                            ),
+                            hex_hash,
+                        )
+                        self.consume_wallet_state(wallet, need)
+                        log.info(
+                            "Recovered stale nonce for %s: retried with %s",
+                            wallet,
+                            fresh_nonce,
+                        )
+                        return
+                    except Exception as retry_exc:
+                        exc = retry_exc
+                        text = str(retry_exc).lower()
                 if "0x13da22f2" in text or "notactive" in text:
                     window_closed = True
                     msg = (
@@ -931,7 +999,29 @@ class MintCopyService:
                 tx["nonce"] = nonce
                 signed = account.sign_transaction(tx)
                 raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
-                tx_hash = self.w3.eth.send_raw_transaction(raw)
+                try:
+                    tx_hash = self.w3.eth.send_raw_transaction(raw)
+                except Exception as exc:
+                    if "nonce too low" not in str(exc).lower():
+                        raise
+                    required_nonce = nonce_required_by_error(exc)
+                    bal, fresh_nonce = self.force_wallet_state(
+                        my_wallet, required_nonce
+                    )
+                    if bal < need:
+                        return (
+                            False,
+                            "Insufficient ETH after nonce refresh",
+                            None,
+                        )
+                    tx["nonce"] = fresh_nonce
+                    signed = account.sign_transaction(tx)
+                    raw = (
+                        getattr(signed, "raw_transaction", None)
+                        or signed.rawTransaction
+                    )
+                    tx_hash = self.w3.eth.send_raw_transaction(raw)
+                    qty_note = f"{qty_note}; nonce refreshed"
                 hex_hash = tx_hash.hex()
                 if not hex_hash.startswith("0x"):
                     hex_hash = "0x" + hex_hash

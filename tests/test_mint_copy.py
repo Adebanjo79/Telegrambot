@@ -301,3 +301,58 @@ def test_free_seadrop_fast_path_live_blasts_all_wallets():
     assert all(h is not None for *_, h in results)
     assert len(sent) == 2
     assert all("[fast]" in msg for _, _, msg, _ in results)
+
+
+def test_fast_path_refreshes_and_retries_stale_nonce():
+    pk = "0x" + "ab" * 32
+    wallet = Account.from_key(pk).address
+    settings = _settings(
+        dry_run=False,
+        private_keys=(pk,),
+        my_wallets=(wallet,),
+        private_key=pk,
+        my_wallet=wallet,
+    )
+    w3 = MagicMock()
+    w3.eth.get_block.return_value = {"baseFeePerGas": 100}
+    now = int(time.time())
+    public_drop = (
+        f"{0:064x}"
+        + f"{now - 10:064x}"
+        + f"{now + 3600:064x}"
+        + f"{5:064x}"
+        + f"{0:064x}"
+        + f"{0:064x}"
+    )
+    w3.eth.call.return_value = bytes.fromhex(public_drop)
+    w3.to_wei.return_value = 50_000_000
+    w3.eth.get_balance.return_value = 10**18
+    # Deliberately stale RPC response; error's state nonce must win.
+    w3.eth.get_transaction_count.return_value = 222
+
+    class _Hash:
+        def hex(self) -> str:
+            return "99" * 32
+
+    w3.eth.send_raw_transaction.side_effect = [
+        ValueError(
+            {
+                "code": -32000,
+                "message": (
+                    "nonce too low: address 0x123, tx: 222 state: 223"
+                ),
+            }
+        ),
+        _Hash(),
+    ]
+    service = MintCopyService(settings, w3)
+    service._wallet_state[wallet.lower()] = (10**18, 222, time.monotonic())
+
+    results = service.try_copy_all(
+        _seadrop_public_candidate(settings.target_wallets[0])
+    )
+    assert results[0][1] is True
+    assert "nonce refreshed" in results[0][2]
+    assert w3.eth.send_raw_transaction.call_count == 2
+    # Retry used nonce 223, then accepted transaction advanced cache to 224.
+    assert service.wallet_state(wallet)[1] == 224
