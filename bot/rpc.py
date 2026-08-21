@@ -43,6 +43,10 @@ RETRY_HINTS = (
     "bad gateway",
     "gateway timeout",
     "service unavailable",
+    # Binary / gzip / corrupted HTTP bodies from an RPC node
+    "codec can't decode",
+    "invalid start byte",
+    "unicodedecodeerror",
 )
 
 # Endpoint is unusable (revoked key, deleted node, DNS/TLS failure).
@@ -62,6 +66,9 @@ ENDPOINT_DOWN_HINTS = (
     "temporary failure in name resolution",
     "max retries exceeded",
     "ssl",
+    "codec can't decode",
+    "invalid start byte",
+    "unicodedecodeerror",
 )
 
 # Provider quota / rate-limit / "RPC is full" signals.
@@ -105,11 +112,15 @@ def is_rpc_capacity_error(exc: BaseException) -> bool:
 
 def is_endpoint_down_error(exc: BaseException) -> bool:
     """True when this endpoint itself is unusable (bad key, gone, DNS/TLS)."""
+    if isinstance(exc, UnicodeError):
+        return True
     blob = _error_blob(exc)
     return any(hint in blob for hint in ENDPOINT_DOWN_HINTS)
 
 
 def is_transient_rpc_error(exc: BaseException) -> bool:
+    if isinstance(exc, UnicodeError):
+        return True
     blob = _error_blob(exc)
     if is_rpc_capacity_error(exc) or is_endpoint_down_error(exc):
         return True

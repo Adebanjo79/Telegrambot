@@ -11,6 +11,12 @@ def test_is_transient_rpc_error():
     assert is_transient_rpc_error(ConnectionError("Remote end closed connection without response"))
     assert is_transient_rpc_error(TimeoutError("timed out"))
     assert not is_transient_rpc_error(ValueError("bad private key"))
+    garbled = UnicodeDecodeError("utf-8", b"\x00\xb5", 1, 2, "invalid start byte")
+    assert is_transient_rpc_error(garbled)
+    assert is_endpoint_down_error(garbled)
+    assert is_transient_rpc_error(
+        Exception("'utf-8' codec can't decode byte 0xb5 in position 1: invalid start byte")
+    )
 
 
 def test_is_rpc_capacity_error():

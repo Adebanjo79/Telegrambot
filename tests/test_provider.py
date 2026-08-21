@@ -65,6 +65,25 @@ def test_rotates_when_endpoint_key_is_revoked():
     assert provider.failover_count == 1
 
 
+def test_rotates_when_rpc_returns_invalid_utf8():
+    provider = FailoverHTTPProvider([PRIMARY, BACKUP])
+
+    def fake_make_request(self, method, params):
+        if self.endpoint_uri == PRIMARY:
+            raise UnicodeDecodeError(
+                "utf-8", b"\x00\xb5", 1, 2, "invalid start byte"
+            )
+        return {"jsonrpc": "2.0", "id": 1, "result": "0x4"}
+
+    with patch(
+        "web3.providers.rpc.HTTPProvider.make_request", new=fake_make_request
+    ):
+        result = provider.make_request("eth_blockNumber", [])
+
+    assert result["result"] == "0x4"
+    assert provider.active_endpoint == BACKUP
+
+
 def test_load_balance_alternates_between_endpoints():
     provider = FailoverHTTPProvider([PRIMARY, BACKUP], load_balance=True)
     seen: list[str] = []
