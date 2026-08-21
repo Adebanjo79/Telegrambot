@@ -41,6 +41,7 @@ KNOWN_ERRORS = {
     "0xe450d38c": "ERC20InsufficientBalance (this mint needs an ERC20 token — not a free mint)",
     "0xf477d26f": "FeeRecipientNotAllowed",
     "0x13da22f2": "NotActive (public drop window closed or not started)",
+    "0x201c04ab": "IncorrectETHAmount (this mint requires a specific ETH payment — not a free mint)",
 }
 
 PAID_MINT_SELECTORS = (
@@ -48,6 +49,7 @@ PAID_MINT_SELECTORS = (
     "0xcd1c8867",
     "0xfb8f41b2",
     "0xe450d38c",
+    "0x201c04ab",
 )
 
 _NONCE_STATE_PATTERNS = (

@@ -10,6 +10,7 @@ from bot.mint_copy import (
     SEADROP,
     SEADROP_MINT_PUBLIC,
     MintCopyService,
+    friendly_revert,
     normalize_seadrop_mint_public,
     rewrite_calldata_for_my_wallet,
     seadrop_mint_public_quantity,
@@ -116,6 +117,12 @@ def test_generic_address_rewrite():
     assert "22" * 20 in out
     assert "11" * 20 not in out
     assert "replaced" in note
+
+
+def test_friendly_revert_maps_ccff00_incorrect_eth_amount():
+    msg = friendly_revert(Exception("('0x201c04ab', '0x201c04ab')"))
+    assert "IncorrectETHAmount" in msg
+    assert "not a free mint" in msg.lower()
 
 
 def test_collection_info_reads_seadrop_nft_name_and_caches_it():
