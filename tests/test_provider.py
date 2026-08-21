@@ -167,6 +167,30 @@ def test_failback_stays_on_backup_while_primary_is_full():
     assert provider.failback_count == 0
 
 
+def test_garbled_primary_holds_backup_instead_of_flapping():
+    provider = FailoverHTTPProvider(
+        [PRIMARY, BACKUP], max_rps=1000, failback_after_sec=5.0
+    )
+
+    def fake_make_request(self, method, params):
+        if self.endpoint_uri == PRIMARY:
+            raise UnicodeDecodeError(
+                "utf-8", b"\x00\xb5", 1, 2, "invalid start byte"
+            )
+        return {"jsonrpc": "2.0", "id": 1, "result": {"number": "0x1"}}
+
+    with patch(
+        "web3.providers.rpc.HTTPProvider.make_request", new=fake_make_request
+    ):
+        provider.make_request("eth_getBlockByNumber", ["latest", True])
+        assert provider.active_endpoint == BACKUP
+        provider._left_primary_at = 0.0
+        assert provider.maybe_failback() is False
+        assert provider.active_endpoint == BACKUP
+        provider._hold_backup_until = 0.0
+        assert provider.maybe_failback() is False
+
+
 def test_retries_429_on_single_endpoint():
     provider = FailoverHTTPProvider([PRIMARY], max_rps=1000)
     calls = {"n": 0}

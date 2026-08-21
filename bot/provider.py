@@ -19,6 +19,15 @@ from bot.rpc import (
 log = logging.getLogger(__name__)
 
 
+def _is_garbled_rpc_reason(reason: str) -> bool:
+    blob = reason.lower()
+    return (
+        "codec can't decode" in blob
+        or "invalid start byte" in blob
+        or "unicodedecodeerror" in blob
+    )
+
+
 class FailoverHTTPProvider(HTTPProvider):
     """
     HTTP provider that spreads work across several RPC endpoints.
@@ -55,6 +64,10 @@ class FailoverHTTPProvider(HTTPProvider):
         self.failover_count = 0
         self.failback_count = 0
         self._left_primary_at = 0.0
+        # After a garbled (non-UTF-8) primary reply, stay on backup so we
+        # don't flap every failback_after_sec.
+        self._hold_backup_until = 0.0
+        self._garbled_hold_sec = 180.0
         # Mint copies run in threads, so all shared counters need a lock.
         self._samples: deque[tuple[float, float]] = deque(maxlen=4000)
         self._samples_lock = threading.Lock()
@@ -98,6 +111,7 @@ class FailoverHTTPProvider(HTTPProvider):
             return
         with self._switch_lock:
             previous = self.active_endpoint
+            leaving_primary = self._index == 0
             self._index = (self._index + 1) % len(self.endpoints)
             self.endpoint_uri = self.active_endpoint
             self.last_failover_reason = reason
@@ -105,6 +119,15 @@ class FailoverHTTPProvider(HTTPProvider):
             self.failover_count += 1
             if self._index != 0:
                 self._left_primary_at = time.monotonic()
+                if leaving_primary and _is_garbled_rpc_reason(reason):
+                    hold_for = self._garbled_hold_sec
+                    self._hold_backup_until = time.monotonic() + hold_for
+                    self._garbled_hold_sec = min(hold_for * 2, 900.0)
+                    log.warning(
+                        "Primary returned garbled data; staying on backup "
+                        "for %.0fs",
+                        hold_for,
+                    )
             log.warning(
                 "Switching RPC endpoint %s -> %s (%s)",
                 previous,
@@ -120,18 +143,29 @@ class FailoverHTTPProvider(HTTPProvider):
         """
         if self.load_balance or len(self.endpoints) < 2 or self.on_primary:
             return False
-        if time.monotonic() - self._left_primary_at < self.failback_after_sec:
+        now = time.monotonic()
+        if now < self._hold_backup_until:
+            return False
+        if now - self._left_primary_at < self.failback_after_sec:
             return False
 
         primary = self.endpoints[0]
         try:
             self._pace()
             started = time.monotonic()
-            response = self._children[0].make_request("eth_blockNumber", [])
+            # Probe a full latest block — Chainstack can answer eth_blockNumber
+            # while eth_getBlockByNumber still returns garbled bytes.
+            response = self._children[0].make_request(
+                "eth_getBlockByNumber", ["latest", True]
+            )
             self._record(started, primary)
         except Exception as exc:  # noqa: BLE001 - stay on backup
             log.info("Primary still unhealthy, staying on backup: %s", exc)
             self._left_primary_at = time.monotonic()
+            if _is_garbled_rpc_reason(str(exc)):
+                self._hold_backup_until = (
+                    time.monotonic() + self._garbled_hold_sec
+                )
             return False
 
         capacity_error = self._response_capacity_error(response)
@@ -149,6 +183,8 @@ class FailoverHTTPProvider(HTTPProvider):
             self.last_failover_reason = "primary recovered"
             self.last_switch_kind = "failback"
             self.failback_count += 1
+            self._garbled_hold_sec = 180.0
+            self._hold_backup_until = 0.0
             log.info("Failing back to primary RPC %s (was %s)", primary, previous)
         return True
 

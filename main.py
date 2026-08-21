@@ -324,6 +324,7 @@ async def watch_loop(
     last_failback_check = 0.0
     load_warned = False
     last_lag_alert = 0.0
+    last_rpc_switch_alert = 0.0
     while True:
         try:
             # Report both failover (to backup) and failback (to primary).
@@ -331,22 +332,26 @@ async def watch_loop(
             if switches > seen_switches:
                 seen_switches = switches
                 kind = getattr(provider, "last_switch_kind", "failover")
-                try:
-                    if kind == "failback":
-                        await tracker.notify(
-                            "↩️ Back on primary RPC (Chainstack)\n"
-                            f"Now using: {provider.active_endpoint}\n"
-                            "Backup Alchemy is idle again."
-                        )
-                    else:
-                        await tracker.notify(
-                            "🔁 Switched to backup RPC\n"
-                            f"Now using: {provider.active_endpoint}\n"
-                            f"Reason: {provider.last_failover_reason}\n"
-                            "Will return to Chainstack automatically when it recovers."
-                        )
-                except Exception:
-                    pass
+                loop_now = asyncio.get_running_loop().time()
+                if loop_now - last_rpc_switch_alert >= 180:
+                    last_rpc_switch_alert = loop_now
+                    try:
+                        if kind == "failback":
+                            await tracker.notify(
+                                "↩️ Back on primary RPC (Chainstack)\n"
+                                f"Now using: {provider.active_endpoint}\n"
+                                "Backup Alchemy is idle again."
+                            )
+                        else:
+                            await tracker.notify(
+                                "🔁 Switched to backup RPC\n"
+                                f"Now using: {provider.active_endpoint}\n"
+                                f"Reason: {provider.last_failover_reason}\n"
+                                "Staying on backup for a few minutes if "
+                                "Chainstack keeps sending garbled replies."
+                            )
+                    except Exception:
+                        pass
 
             now = asyncio.get_running_loop().time()
             if provider is not None and now - last_failback_check >= 15:
@@ -357,15 +362,19 @@ async def watch_loop(
                     log.exception("RPC failback probe failed")
                     did_failback = False
                 if did_failback:
-                    seen_switches = getattr(provider, "switch_count", seen_switches)
-                    try:
-                        await tracker.notify(
-                            "↩️ Back on primary RPC (Chainstack)\n"
-                            f"Now using: {provider.active_endpoint}\n"
-                            "Backup Alchemy is idle again."
-                        )
-                    except Exception:
-                        pass
+                    seen_switches = getattr(
+                        provider, "switch_count", seen_switches
+                    )
+                    if now - last_rpc_switch_alert >= 180:
+                        last_rpc_switch_alert = now
+                        try:
+                            await tracker.notify(
+                                "↩️ Back on primary RPC (Chainstack)\n"
+                                f"Now using: {provider.active_endpoint}\n"
+                                "Backup Alchemy is idle again."
+                            )
+                        except Exception:
+                            pass
 
             if provider is not None and now - last_load_check >= 10:
                 last_load_check = now
