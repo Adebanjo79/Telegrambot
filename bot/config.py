@@ -26,6 +26,25 @@ def _parse_bool(value: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _normalize_rpc_url(raw: str) -> str:
+    """
+    Accept a bare https URL. Strip a pasted `RPC_URL=` / `RPC_URLS=` prefix
+    so a .env typo does not become the request URL.
+    """
+    url = raw.strip().strip('"').strip("'")
+    lowered = url.lower()
+    for prefix in ("rpc_urls=", "rpc_url="):
+        if lowered.startswith(prefix):
+            url = url[len(prefix) :].strip().strip('"').strip("'")
+            break
+    if not url.lower().startswith(("http://", "https://")):
+        raise ValueError(
+            "Each RPC URL must start with http:// or https://. "
+            "Do not include RPC_URL= in the value — only the URL."
+        )
+    return url
+
+
 def _normalize_private_key(raw: str) -> str:
     private_key = raw.strip().strip('"').strip("'")
     if private_key.lower() in {
@@ -126,7 +145,7 @@ class Settings:
 
         # RPC_URLS=primary,backup enables automatic failover between nodes.
         rpc_urls = tuple(
-            url.strip()
+            _normalize_rpc_url(url)
             for url in _opt(
                 "RPC_URLS",
                 _opt("RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
