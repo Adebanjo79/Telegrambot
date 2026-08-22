@@ -28,6 +28,18 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 
+def rpc_host(url: str) -> str:
+    """Human label for Telegram: alchemy / chainstack / hostname."""
+    text = (url or "").lower()
+    if "alchemy.com" in text:
+        return "Alchemy"
+    if "chainstack.com" in text:
+        return "Chainstack"
+    if "://" in text:
+        return text.split("://", 1)[1].split("/", 1)[0]
+    return text or "RPC"
+
+
 def code_version() -> str:
     """Pinned version + git SHA so Telegram proves which code is running."""
     try:
@@ -336,19 +348,20 @@ async def watch_loop(
                 if loop_now - last_rpc_switch_alert >= 180:
                     last_rpc_switch_alert = loop_now
                     try:
+                        primary = rpc_host(provider.endpoints[0])
+                        active = rpc_host(provider.active_endpoint)
                         if kind == "failback":
                             await tracker.notify(
-                                "↩️ Back on primary RPC (Chainstack)\n"
+                                f"↩️ Back on primary RPC ({primary})\n"
                                 f"Now using: {provider.active_endpoint}\n"
-                                "Backup Alchemy is idle again."
+                                "Backup is idle again."
                             )
                         else:
                             await tracker.notify(
-                                "🔁 Switched to backup RPC\n"
+                                f"🔁 Switched to backup RPC ({active})\n"
                                 f"Now using: {provider.active_endpoint}\n"
                                 f"Reason: {provider.last_failover_reason}\n"
-                                "Staying on backup for a few minutes if "
-                                "Chainstack keeps sending garbled replies."
+                                f"Staying on backup if {primary} keeps failing."
                             )
                     except Exception:
                         pass
@@ -369,9 +382,9 @@ async def watch_loop(
                         last_rpc_switch_alert = now
                         try:
                             await tracker.notify(
-                                "↩️ Back on primary RPC (Chainstack)\n"
+                                f"↩️ Back on primary RPC ({rpc_host(provider.endpoints[0])})\n"
                                 f"Now using: {provider.active_endpoint}\n"
-                                "Backup Alchemy is idle again."
+                                "Backup is idle again."
                             )
                         except Exception:
                             pass
