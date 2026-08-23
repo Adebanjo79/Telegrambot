@@ -1,16 +1,14 @@
 [Unit]
-Description=Robinhood Chain NFT Copy Bot
+Description=Ink Chain NFT Copy Bot
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# If Telegram online alerts have no "Build:" line, systemd is starting
-# a different folder than the one you git pull. These paths must match.
 User=root
-WorkingDirectory=/root/robinhood-nft-copy-bot
+WorkingDirectory=/opt/nft-copy-bot
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/root/robinhood-nft-copy-bot/.venv/bin/python main.py
+ExecStart=/opt/nft-copy-bot/.venv/bin/python main.py
 Restart=always
 RestartSec=5
 

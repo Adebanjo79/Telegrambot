@@ -12,7 +12,7 @@ from bot.rpc import is_transient_rpc_error, rpc_call
 
 log = logging.getLogger(__name__)
 
-# OpenSea SeaDrop (same address on many chains, including Robinhood Chain)
+# OpenSea SeaDrop (same address on many chains, including Ink)
 SEADROP = "0x00005ea00ac477b1030ce78506496e8c2de24bf5"
 
 # Common public mint / claim selectors (first 4 bytes of keccak of the signature).
@@ -86,7 +86,7 @@ def _quantity_int(value: Any) -> int:
 
 
 class WalletWatcher:
-    """Poll Robinhood Chain for mint-like txs from watched wallets."""
+    """Poll the configured chain for mint-like txs from watched wallets."""
 
     def __init__(self, settings: Settings, w3: Web3) -> None:
         self.settings = settings

@@ -18,7 +18,7 @@ from bot.wallet_store import DEFAULT_STORE, load_extra_keys, merge_keys, save_ke
 
 log = logging.getLogger(__name__)
 
-# OpenSea SeaDrop 1.0 (same address on many chains, including Robinhood Chain)
+# OpenSea SeaDrop 1.0 (same address on many EVM chains, including Ink)
 SEADROP = "0x00005ea00ac477b1030ce78506496e8c2de24bf5"
 # mintPublic(address,address,address,uint256)
 SEADROP_MINT_PUBLIC = "0x161ac21f"

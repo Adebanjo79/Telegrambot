@@ -99,6 +99,7 @@ class Settings:
     pending_subscription: str = "auto"
     wallet_state_refresh_sec: float = 5.0
     wallet_state_ttl_sec: float = 15.0
+    network_name: str = "Ink"
 
     @classmethod
     def load(cls, env_file: str | None = ".env") -> "Settings":
@@ -148,7 +149,7 @@ class Settings:
             _normalize_rpc_url(url)
             for url in _opt(
                 "RPC_URLS",
-                _opt("RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
+                _opt("RPC_URL", "https://rpc-gel.inkonchain.com"),
             ).split(",")
             if url.strip()
         )
@@ -176,10 +177,11 @@ class Settings:
             telegram_owner_id=owner_id,
             rpc_url=rpc_urls[0],
             rpc_urls=rpc_urls,
-            chain_id=int(_opt("CHAIN_ID", "4663")),
-            explorer_url=_opt("EXPLORER_URL", "https://robinhoodchain.blockscout.com").rstrip(
+            chain_id=int(_opt("CHAIN_ID", "57073")),
+            explorer_url=_opt("EXPLORER_URL", "https://explorer.inkonchain.com").rstrip(
                 "/"
             ),
+            network_name=_opt("NETWORK_NAME", "Ink"),
             target_wallets=targets,
             private_keys=private_keys,
             my_wallets=my_wallets,
