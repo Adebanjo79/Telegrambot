@@ -8,7 +8,7 @@ from web3 import Web3
 
 from bot.config import Settings
 from bot.models import MintCandidate
-from bot.rpc import is_transient_rpc_error, rpc_call
+from bot.rpc import is_block_not_found, is_transient_rpc_error, rpc_call
 
 log = logging.getLogger(__name__)
 
@@ -134,16 +134,13 @@ class WalletWatcher:
 
         for block_number in range(start, end + 1):
             try:
-                block = rpc_call(
-                    lambda n=block_number: self.w3.eth.get_block(n, full_transactions=True)
-                )
+                block = self._fetch_block(block_number)
             except Exception as exc:
-                msg = str(exc).lower()
                 log.warning("Failed to fetch block %s: %s", block_number, exc)
                 # Keep progress up to the last successful block so we retry later.
                 self.last_block = last_ok
                 # Missing/reorged blocks are common on fast L2 RPCs — retry next poll.
-                if "not found" in msg or "header not found" in msg or "block with id" in msg:
+                if is_block_not_found(exc):
                     return found
                 raise
 
@@ -155,6 +152,47 @@ class WalletWatcher:
 
         self.last_block = last_ok
         return found
+
+    def _fetch_block(self, block_number: int) -> Any:
+        """
+        Fetch one block, rotating RPC endpoints when a node is ahead of its index.
+
+        Ink / other L2 public nodes sometimes return eth_blockNumber higher than
+        the latest block they can serve — BlockNotFound on get_block. Fail over
+        immediately instead of crashing the watcher.
+        """
+        provider = getattr(self.w3, "provider", None)
+        endpoints = getattr(provider, "endpoints", None) or [None]
+        last_exc: BaseException | None = None
+        attempts = max(2, len(endpoints) + 1)
+
+        for attempt in range(attempts):
+            try:
+                return rpc_call(
+                    lambda n=block_number: self.w3.eth.get_block(
+                        n, full_transactions=True
+                    ),
+                    retries=2 if attempt == 0 else 1,
+                    base_delay=0.25,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if is_block_not_found(exc) and provider is not None and hasattr(
+                    provider, "_rotate"
+                ):
+                    log.warning(
+                        "Block %s missing on %s; trying next RPC",
+                        block_number,
+                        getattr(provider, "active_endpoint", "?"),
+                    )
+                    provider._rotate(str(exc))
+                    continue
+                if is_block_not_found(exc) and attempt + 1 < attempts:
+                    continue
+                raise
+
+        assert last_exc is not None
+        raise last_exc
 
     def inspect_pending(self, tx: Any) -> MintCandidate | None:
         """Inspect a full pending transaction without waiting for a receipt."""

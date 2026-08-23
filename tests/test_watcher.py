@@ -6,6 +6,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock
 
 from web3 import Web3
+from web3.exceptions import BlockNotFound
 
 from bot.models import MintCandidate
 from bot.watcher import (
@@ -108,6 +109,55 @@ def test_poll_never_skips_blocks_when_behind():
     watcher.poll()
     assert watcher.last_block == 104
 
+
+def test_poll_block_not_found_rotates_rpc_and_retries():
+    """L2 RPCs can report a head block before get_block serves it."""
+    settings = _settings(max_catchup_blocks=5)
+    w3 = MagicMock()
+    provider = MagicMock()
+    provider.endpoints = ["https://rpc-a.example", "https://rpc-b.example"]
+    provider.active_endpoint = provider.endpoints[0]
+    provider._rotate = MagicMock()
+    w3.provider = provider
+    watcher = WalletWatcher(settings, w3)
+    watcher.last_block = 100
+    w3.eth.block_number = 102
+
+    calls = {"n": 0}
+
+    def fake_block(n, full_transactions=True):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise BlockNotFound(f"Block with id: '{hex(n)}' not found.")
+        return MagicMock(transactions=[])
+
+    w3.eth.get_block.side_effect = fake_block
+    found = watcher.poll()
+    assert found == []
+    assert watcher.last_block == 102
+    provider._rotate.assert_called_once()
+
+
+def test_poll_block_not_found_on_all_nodes_waits_without_crash():
+    settings = _settings(max_catchup_blocks=5)
+    w3 = MagicMock()
+    provider = MagicMock()
+    provider.endpoints = ["https://rpc-a.example", "https://rpc-b.example"]
+    provider.active_endpoint = provider.endpoints[0]
+    provider._rotate = MagicMock()
+    w3.provider = provider
+    watcher = WalletWatcher(settings, w3)
+    watcher.last_block = 100
+    w3.eth.block_number = 102
+
+    def fake_block(n, full_transactions=True):
+        raise BlockNotFound(f"Block with id: '{hex(n)}' not found.")
+
+    w3.eth.get_block.side_effect = fake_block
+    found = watcher.poll()
+    assert found == []
+    assert watcher.last_block == 100
+    assert provider._rotate.call_count >= 1
 
 
 def test_watcher_ignores_non_target_and_non_mint():

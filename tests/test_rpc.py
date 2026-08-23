@@ -17,6 +17,9 @@ def test_is_transient_rpc_error():
     assert is_transient_rpc_error(
         Exception("'utf-8' codec can't decode byte 0xb5 in position 1: invalid start byte")
     )
+    from web3.exceptions import BlockNotFound
+
+    assert is_transient_rpc_error(BlockNotFound("Block with id: '0x3382e38' not found."))
 
 
 def test_is_rpc_capacity_error():

@@ -5,6 +5,12 @@ import time
 from collections.abc import Callable
 from typing import TypeVar
 
+try:
+    from web3.exceptions import BlockNotFound
+except ImportError:  # pragma: no cover - very old web3
+    class BlockNotFound(Exception):  # type: ignore[no-redef]
+        pass
+
 log = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -118,8 +124,18 @@ def is_endpoint_down_error(exc: BaseException) -> bool:
     return any(hint in blob for hint in ENDPOINT_DOWN_HINTS)
 
 
+def is_block_not_found(exc: BaseException) -> bool:
+    """True when the node has not indexed this block yet (common on fast L2 RPCs)."""
+    if isinstance(exc, BlockNotFound):
+        return True
+    blob = _error_blob(exc)
+    return "block with id" in blob or "header not found" in blob
+
+
 def is_transient_rpc_error(exc: BaseException) -> bool:
     if isinstance(exc, UnicodeError):
+        return True
+    if is_block_not_found(exc):
         return True
     blob = _error_blob(exc)
     if is_rpc_capacity_error(exc) or is_endpoint_down_error(exc):
