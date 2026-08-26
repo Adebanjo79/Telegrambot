@@ -89,7 +89,7 @@ python main.py
 | `GAS_LIMIT` | Gas limit for copy txs |
 | `RPC_RATE_LIMIT` | Your plan's requests/second cap (default `25`) |
 | `RPC_WARN_PERCENT` | Warn once usage passes this share of the cap (default `80`) |
-| `RPC_SLOW_MS` | Warn when average response time exceeds this (default `1500`) |
+| `RPC_SLOW_MS` | Warn and fail over to backup when average response exceeds this (default `1500`) |
 | `PENDING_DETECTION` | `true` = watch the mempool before block confirmation (advanced; default `false`) |
 | `PENDING_WS_URL` | WebSocket RPC (`wss://...`) with full pending transactions |
 | `PENDING_SUBSCRIPTION` | `auto`, `alchemy`, or `full`; default `auto` |

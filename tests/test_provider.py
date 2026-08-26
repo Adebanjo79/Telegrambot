@@ -65,6 +65,51 @@ def test_rotates_when_endpoint_key_is_revoked():
     assert provider.failover_count == 1
 
 
+def test_maybe_failover_slow_rotates_to_backup():
+    provider = FailoverHTTPProvider([PRIMARY, BACKUP], slow_ms=1500)
+    import time
+
+    now = time.monotonic()
+    for i in range(5):
+        provider._samples.append((now - (i * 0.001), 1.8))
+    assert provider.maybe_failover_slow() is True
+    assert provider.active_endpoint == BACKUP
+    assert "slow RPC" in provider.last_failover_reason
+    assert provider._hold_backup_until > time.monotonic()
+
+
+def test_maybe_failover_slow_skips_when_fast():
+    provider = FailoverHTTPProvider([PRIMARY, BACKUP], slow_ms=1500)
+    import time
+
+    now = time.monotonic()
+    for i in range(5):
+        provider._samples.append((now - (i * 0.001), 0.04))
+    assert provider.maybe_failover_slow() is False
+    assert provider.active_endpoint == PRIMARY
+
+
+def test_failback_stays_on_backup_when_primary_probe_is_slow():
+    provider = FailoverHTTPProvider(
+        [PRIMARY, BACKUP], max_rps=1000, failback_after_sec=5.0, slow_ms=1500
+    )
+    provider._index = 1
+    provider._left_primary_at = 0.0
+
+    def fake_make_request(self, method, params):
+        import time
+
+        time.sleep(0.05)
+        return {"jsonrpc": "2.0", "id": 1, "result": {"number": "0x1"}}
+
+    provider.slow_ms = 10  # 50ms probe exceeds 10ms limit
+    with patch(
+        "web3.providers.rpc.HTTPProvider.make_request", new=fake_make_request
+    ):
+        assert provider.maybe_failback() is False
+    assert provider.active_endpoint == BACKUP
+
+
 def test_rotates_when_rpc_returns_invalid_utf8():
     provider = FailoverHTTPProvider([PRIMARY, BACKUP])
 

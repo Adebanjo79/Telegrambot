@@ -79,6 +79,18 @@ def test_quiet_when_healthy_and_reports_recovery():
     assert tracker.rpc_health == "OK"
 
 
+def test_does_not_call_recovered_when_still_over_800ms():
+    tracker = FakeTracker()
+    # 1.2s avg is under the 1500ms warn line but still too slow to mint.
+    provider = _provider_with(8, 1.2)
+
+    warned, last = asyncio.run(check_rpc_load(tracker, provider, 200.0, True, 100.0))
+    assert warned is True
+    assert last == 100.0
+    assert tracker.sent == []
+    assert tracker.rpc_health == "SLOW"
+
+
 def test_load_balancing_raises_the_effective_cap():
     tracker = FakeTracker()
     # 21/s would warn on one node, but two balanced nodes allow 50/s.

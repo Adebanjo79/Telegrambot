@@ -60,6 +60,7 @@ def build_web3(
     load_balance: bool = False,
     max_rps: float = 20.0,
     failback_after_sec: float = 30.0,
+    slow_ms: float = 1500.0,
 ) -> Web3:
     # Leave ~20% headroom under the plan cap so mint bursts don't 429.
     provider = FailoverHTTPProvider(
@@ -67,6 +68,7 @@ def build_web3(
         load_balance=load_balance,
         max_rps=max(1.0, max_rps * 0.8),
         failback_after_sec=failback_after_sec,
+        slow_ms=slow_ms,
         request_kwargs={"timeout": 45},
     )
     w3 = Web3(provider)
@@ -108,6 +110,11 @@ async def check_rpc_load(
         )
     if stats["requests"] >= 3 and avg_ms >= settings.rpc_slow_ms:
         problems.append(f"RPC is slow: {avg_ms:.0f} ms average response")
+        try:
+            if provider.maybe_failover_slow(settings.rpc_slow_ms):
+                problems.append(f"Switched to backup: {provider.active_endpoint}")
+        except Exception:
+            log.exception("Slow-RPC failover failed")
 
     if problems:
         tracker.rpc_health = "BUSY" if "Quota" in problems[0] else "SLOW"
@@ -118,11 +125,18 @@ async def check_rpc_load(
                     "⚠️ RPC is getting close to its limit\n"
                     f"{body}\n"
                     "Mints may be missed if it keeps climbing. "
-                    "Consider upgrading the node or adding a backup to RPC_URLS."
+                    "The bot will use a backup RPC if one is configured."
                 )
             except Exception:
                 pass
             return True, now
+        return True, last_alert
+
+    still_slow = stats["requests"] >= 3 and avg_ms >= min(
+        settings.rpc_slow_ms * 0.6, 800.0
+    )
+    if was_warned and still_slow:
+        tracker.rpc_health = "SLOW"
         return True, last_alert
 
     if was_warned:
@@ -486,6 +500,7 @@ async def async_main() -> int:
         settings.rpc_load_balance,
         settings.rpc_rate_limit,
         settings.rpc_failback_sec,
+        settings.rpc_slow_ms,
     )
     chain_id = w3.eth.chain_id
     if chain_id != settings.chain_id:

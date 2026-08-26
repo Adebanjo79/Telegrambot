@@ -50,6 +50,7 @@ class FailoverHTTPProvider(HTTPProvider):
         load_balance: bool = False,
         max_rps: float = 20.0,
         failback_after_sec: float = 30.0,
+        slow_ms: float = 1500.0,
         **kwargs: Any,
     ) -> None:
         if not endpoints:
@@ -68,6 +69,7 @@ class FailoverHTTPProvider(HTTPProvider):
         # don't flap every failback_after_sec.
         self._hold_backup_until = 0.0
         self._garbled_hold_sec = 180.0
+        self.slow_ms = max(200.0, float(slow_ms))
         # Mint copies run in threads, so all shared counters need a lock.
         self._samples: deque[tuple[float, float]] = deque(maxlen=4000)
         self._samples_lock = threading.Lock()
@@ -135,6 +137,30 @@ class FailoverHTTPProvider(HTTPProvider):
                 reason,
             )
 
+    def maybe_failover_slow(self, slow_ms: float | None = None) -> bool:
+        """
+        If the active node is consistently slow, move to the next RPC.
+
+        Public Robinhood RPC often stays up but takes 1.5s+ per call. That is
+        not a 429, so normal failover never fires and mints get missed.
+        """
+        if self.load_balance or len(self.endpoints) < 2:
+            return False
+        limit = self.slow_ms if slow_ms is None else max(200.0, float(slow_ms))
+        if time.monotonic() < self._hold_backup_until:
+            return False
+        stats = self.load_stats()
+        if stats["requests"] < 3 or stats["avg_ms"] < limit:
+            return False
+        reason = (
+            f"slow RPC ({stats['avg_ms']:.0f} ms avg, limit {limit:.0f} ms)"
+        )
+        self._rotate(reason)
+        # Stay on backup so we don't flap back to the slow public node.
+        hold_for = max(self.failback_after_sec, 120.0)
+        self._hold_backup_until = time.monotonic() + hold_for
+        return True
+
     def maybe_failback(self) -> bool:
         """
         If we are on a backup, probe the primary and return to it when healthy.
@@ -166,6 +192,15 @@ class FailoverHTTPProvider(HTTPProvider):
                 self._hold_backup_until = (
                     time.monotonic() + self._garbled_hold_sec
                 )
+            return False
+
+        probe_ms = (time.monotonic() - started) * 1000
+        if probe_ms >= self.slow_ms:
+            log.info(
+                "Primary still slow (%.0f ms), staying on backup",
+                probe_ms,
+            )
+            self._left_primary_at = time.monotonic()
             return False
 
         capacity_error = self._response_capacity_error(response)
