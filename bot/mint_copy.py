@@ -532,19 +532,46 @@ class MintCopyService:
         return [r for r in results if r is not None]
 
     def _fee_fields(self) -> dict:
-        tx_fees: dict = {}
+        """
+        Cheap L2 fees. Old 2x baseFee reserved too much ETH and blocked
+        wallets that only have ~$0.10.
+        """
         try:
             latest = self.w3.eth.get_block("latest")
             base_fee = latest.get("baseFeePerGas")
             if base_fee is not None:
-                tip = self.w3.to_wei(0.05, "gwei")
-                tx_fees["maxPriorityFeePerGas"] = tip
-                tx_fees["maxFeePerGas"] = int(base_fee) * 2 + tip
-            else:
-                tx_fees["gasPrice"] = self.w3.eth.gas_price
+                tip = int(self.w3.to_wei(0.01, "gwei"))
+                base = int(base_fee)
+                # 25% headroom over current base + tiny tip.
+                max_fee = base + base // 4 + tip
+                cap = int(self.w3.to_wei(1, "gwei"))
+                if base < cap:
+                    max_fee = min(max_fee, cap)
+                return {
+                    "maxPriorityFeePerGas": tip,
+                    "maxFeePerGas": max(max_fee, base + tip),
+                }
+            return {"gasPrice": int(self.w3.eth.gas_price)}
         except Exception:
-            tx_fees["gasPrice"] = self.w3.eth.gas_price
-        return tx_fees
+            return {"gasPrice": int(self.w3.eth.gas_price)}
+
+    def _copy_gas(self, data: str, contract: str) -> int:
+        """
+        SeaDrop mintPublic rarely needs 300k+. Cap the tx gas field so the
+        node reservation (gas * maxFee) can fit a ~$0.10 wallet on cheap L2.
+        """
+        limit = int(self.settings.gas_limit)
+        if (
+            contract.lower() == SEADROP
+            and data.startswith(SEADROP_MINT_PUBLIC)
+        ):
+            return min(limit, 200000)
+        return limit
+
+    @staticmethod
+    def _needed_wei(gas: int, fees: dict, value_wei: int) -> int:
+        fee_cap = int(fees.get("maxFeePerGas") or fees.get("gasPrice") or 0)
+        return int(gas) * fee_cap + int(value_wei)
 
     def _try_copy_seadrop_public_fast(
         self, accounts: list[LocalAccount], candidate: MintCandidate
@@ -569,6 +596,7 @@ class MintCopyService:
 
         to_addr = Web3.to_checksum_address(candidate.contract_address)
         fees = self._fee_fields()
+        copy_gas = self._copy_gas(data, candidate.contract_address)
 
         # No eth_call on the live path: getPublicDrop already rejected closed
         # windows, and an extra simulation RTT is enough for short free drops
@@ -581,7 +609,7 @@ class MintCopyService:
                 "to": to_addr,
                 "data": data,
                 "value": value_wei,
-                "gas": self.settings.gas_limit,
+                "gas": copy_gas,
                 "chainId": self.settings.chain_id,
                 **fees,
             }
@@ -614,8 +642,7 @@ class MintCopyService:
             )
             return [(a.address, True, msg, None) for a in accounts]
 
-        fee_cap = int(fees.get("maxFeePerGas") or fees.get("gasPrice") or 0)
-        need = self.settings.gas_limit * fee_cap + int(value_wei)
+        need = self._needed_wei(copy_gas, fees, value_wei)
         n = len(accounts)
         results: list[tuple[str, bool, str, str | None] | None] = [None] * n
         # Cached balance+nonce means prep is normally local-only. Broadcast
@@ -629,7 +656,7 @@ class MintCopyService:
                 "to": to_addr,
                 "data": data,
                 "value": value_wei,
-                "gas": self.settings.gas_limit,
+                "gas": copy_gas,
                 "chainId": self.settings.chain_id,
                 "nonce": nonce,
                 **fees,
@@ -930,26 +957,19 @@ class MintCopyService:
                     if full_qty > 1:
                         attempt_value = value_wei // full_qty
 
+                fees = self._fee_fields()
+                copy_gas = self._copy_gas(
+                    attempt_data, candidate.contract_address
+                )
                 tx: dict = {
                     "from": my_wallet,
                     "to": Web3.to_checksum_address(candidate.contract_address),
                     "data": attempt_data,
                     "value": attempt_value,
-                    "gas": self.settings.gas_limit,
+                    "gas": copy_gas,
                     "chainId": self.settings.chain_id,
+                    **fees,
                 }
-
-                try:
-                    latest = self.w3.eth.get_block("latest")
-                    base_fee = latest.get("baseFeePerGas")
-                    if base_fee is not None:
-                        tip = self.w3.to_wei(0.05, "gwei")
-                        tx["maxPriorityFeePerGas"] = tip
-                        tx["maxFeePerGas"] = int(base_fee) * 2 + tip
-                    else:
-                        tx["gasPrice"] = self.w3.eth.gas_price
-                except Exception:
-                    tx["gasPrice"] = self.w3.eth.gas_price
 
                 try:
                     self.w3.eth.call(tx)
@@ -981,10 +1001,7 @@ class MintCopyService:
                         None,
                     )
 
-                fee_cap = int(
-                    tx.get("maxFeePerGas") or tx.get("gasPrice") or 0
-                )
-                need = self.settings.gas_limit * fee_cap + int(attempt_value)
+                need = self._needed_wei(copy_gas, fees, attempt_value)
                 try:
                     bal, nonce = self.wallet_state(my_wallet)
                 except Exception as exc:

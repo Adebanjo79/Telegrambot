@@ -86,7 +86,7 @@ python main.py
 | `FREE_MINTS_ONLY` | `true` = skip paid mints |
 | `DRY_RUN` | `true` = notify + simulate only (recommended first) |
 | `POLL_INTERVAL_SEC` | Block poll interval |
-| `GAS_LIMIT` | Gas limit for copy txs |
+| `GAS_LIMIT` | Max gas units (default `200000`). Free SeaDrop copies cap at 200k so small wallets can mint |
 | `RPC_RATE_LIMIT` | Your plan's requests/second cap (default `25`) |
 | `RPC_WARN_PERCENT` | Warn once usage passes this share of the cap (default `80`) |
 | `RPC_SLOW_MS` | Warn and fail over to backup when average response exceeds this (default `1500`) |
