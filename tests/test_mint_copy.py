@@ -363,3 +363,25 @@ def test_fast_path_refreshes_and_retries_stale_nonce():
     assert w3.eth.send_raw_transaction.call_count == 2
     # Retry used nonce 223, then accepted transaction advanced cache to 224.
     assert service.wallet_state(wallet)[1] == 224
+
+
+def test_seadrop_copy_gas_capped_below_env_limit():
+    settings = _settings(gas_limit=300000)
+    service = MintCopyService(settings, MagicMock())
+    data = SEADROP_MINT_PUBLIC + "00" * 128
+    assert service._copy_gas(data, SEADROP) == 200000
+    assert service._copy_gas("0xa0712d68" + "0" * 64, "0x" + "11" * 20) == 300000
+
+
+def test_cheap_l2_fees_fit_ten_cent_wallet():
+    settings = _settings(gas_limit=300000)
+    w3 = MagicMock()
+    w3.to_wei.side_effect = lambda n, u: int(float(n) * 10**9)
+    w3.eth.get_block.return_value = {"baseFeePerGas": 100_000_000}  # 0.1 gwei
+    service = MintCopyService(settings, w3)
+    fees = service._fee_fields()
+    gas = service._copy_gas(SEADROP_MINT_PUBLIC + "00" * 128, SEADROP)
+    need = service._needed_wei(gas, fees, 0)
+    # ~$0.10 at $2500/ETH is 0.00004 ETH. Stay under 0.00005 ETH.
+    assert need < 50_000_000_000_000
+    assert fees["maxFeePerGas"] <= 10**9

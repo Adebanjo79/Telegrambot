@@ -63,3 +63,4 @@ Owner-only. Never reuse this bot token on another running bot.
 - Cannot copy `mintSigned` or allowlist proofs
 - Short public windows can still close mid-blast
 - A bad primary RPC fails over to the backup; the bot cannot fix a broken node
+- Free SeaDrop copies cap gas at 200k so small wallets (~$0.10) can mint when Ink gas is cheap
