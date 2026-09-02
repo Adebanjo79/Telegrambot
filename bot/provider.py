@@ -19,12 +19,17 @@ from bot.rpc import (
 log = logging.getLogger(__name__)
 
 
-def _is_garbled_rpc_reason(reason: str) -> bool:
+def _is_sticky_failover_reason(reason: str) -> bool:
     blob = reason.lower()
     return (
         "codec can't decode" in blob
         or "invalid start byte" in blob
         or "unicodedecodeerror" in blob
+        or "403 client" in blob
+        or "401 client" in blob
+        or "forbidden" in blob
+        or "unauthorized" in blob
+        or "invalid api key" in blob
     )
 
 
@@ -121,13 +126,13 @@ class FailoverHTTPProvider(HTTPProvider):
             self.failover_count += 1
             if self._index != 0:
                 self._left_primary_at = time.monotonic()
-                if leaving_primary and _is_garbled_rpc_reason(reason):
+                if leaving_primary and _is_sticky_failover_reason(reason):
                     hold_for = self._garbled_hold_sec
                     self._hold_backup_until = time.monotonic() + hold_for
                     self._garbled_hold_sec = min(hold_for * 2, 900.0)
                     log.warning(
-                        "Primary returned garbled data; staying on backup "
-                        "for %.0fs",
+                        "Primary is unusable (%s); staying on backup for %.0fs",
+                        reason.split(" for url:")[0].strip()[:80],
                         hold_for,
                     )
             log.warning(
@@ -188,7 +193,7 @@ class FailoverHTTPProvider(HTTPProvider):
         except Exception as exc:  # noqa: BLE001 - stay on backup
             log.info("Primary still unhealthy, staying on backup: %s", exc)
             self._left_primary_at = time.monotonic()
-            if _is_garbled_rpc_reason(str(exc)):
+            if _is_sticky_failover_reason(str(exc)):
                 self._hold_backup_until = (
                     time.monotonic() + self._garbled_hold_sec
                 )

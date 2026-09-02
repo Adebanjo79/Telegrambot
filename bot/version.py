@@ -1,4 +1,4 @@
 """Pinned bot version shown in Telegram so we can tell which code is running."""
 
 # Bump this string whenever copy-path behavior changes.
-BOT_VERSION = "low-gas-seadrop-2026-08-30"
+BOT_VERSION = "rpc-403-skip-stale-2026-09-02"

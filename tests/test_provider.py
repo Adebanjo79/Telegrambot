@@ -165,6 +165,26 @@ def test_load_balance_still_fails_over_when_one_node_is_full():
     assert provider.failover_count == 1
 
 
+def test_403_primary_holds_backup_instead_of_flapping():
+    provider = FailoverHTTPProvider(
+        [PRIMARY, BACKUP], max_rps=1000, failback_after_sec=5.0
+    )
+
+    def fake_make_request(self, method, params):
+        if self.endpoint_uri == PRIMARY:
+            raise Exception("403 Client Error: Forbidden for url: " + PRIMARY)
+        return {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+
+    with patch(
+        "web3.providers.rpc.HTTPProvider.make_request", new=fake_make_request
+    ):
+        provider.make_request("eth_blockNumber", [])
+        assert provider.active_endpoint == BACKUP
+        provider._left_primary_at = 0.0
+        assert provider.maybe_failback() is False
+        assert provider.active_endpoint == BACKUP
+
+
 def test_failback_returns_to_primary_when_healthy():
     provider = FailoverHTTPProvider(
         [PRIMARY, BACKUP], max_rps=1000, failback_after_sec=5.0

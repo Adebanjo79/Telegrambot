@@ -109,6 +109,24 @@ def test_poll_never_skips_blocks_when_behind():
     assert watcher.last_block == 104
 
 
+def test_poll_skips_huge_stale_lag_after_bad_rpc_head():
+    settings = _settings(max_catchup_blocks=25)
+    w3 = MagicMock()
+    watcher = WalletWatcher(settings, w3)
+    watcher.last_block = 100
+    w3.eth.block_number = 100 + 600  # 600 behind, over stale limit 500
+
+    def fake_block(n, full_transactions=True):
+        return MagicMock(transactions=[])
+
+    w3.eth.get_block.side_effect = fake_block
+    found = watcher.poll()
+    assert found == []
+    # Jumped to head - max_catchup, then scanned those 25 blocks.
+    assert watcher.last_block == 700
+    assert watcher.stale_skip_blocks == 575
+    assert watcher.lag_blocks == 25
+
 
 def test_watcher_ignores_non_target_and_non_mint():
     settings = _settings()

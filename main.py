@@ -411,6 +411,18 @@ async def watch_loop(
 
             if watcher.enabled:
                 candidates = await asyncio.to_thread(watcher.poll)
+                skipped = getattr(watcher, "stale_skip_blocks", 0)
+                if skipped:
+                    try:
+                        await tracker.notify(
+                            "⏩ Skipped stale catch-up "
+                            f"({skipped} old blocks).\n"
+                            "A bad RPC head was far behind live. "
+                            "Now scanning near the current block so new mints are not delayed."
+                        )
+                    except Exception:
+                        pass
+
                 if state.get("rpc_was_full"):
                     state["rpc_was_full"] = False
                     tracker.rpc_health = "OK"

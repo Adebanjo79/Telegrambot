@@ -95,6 +95,7 @@ class WalletWatcher:
         self.last_block = 0
         self.target_set = {addr.lower() for addr in settings.target_wallets}
         self.lag_blocks = 0
+        self.stale_skip_blocks = 0
 
     def bootstrap(self) -> int:
         head = rpc_call(lambda: self.w3.eth.block_number)
@@ -105,8 +106,11 @@ class WalletWatcher:
         """
         Scan every new block from last_block+1 onward.
 
-        Never jumps ahead / drops blocks. If the bot is behind, it processes
-        up to max_catchup_blocks per poll and resumes next cycle.
+        If the bot is a little behind, it processes up to max_catchup_blocks
+        per poll and resumes next cycle (no small gaps).
+
+        If lag is huge (dead RPC / wrong head, then failover), skip to near
+        the live head — those old blocks cannot be copied anyway.
         """
         if not self.enabled:
             return []
@@ -114,10 +118,29 @@ class WalletWatcher:
         head = rpc_call(lambda: self.w3.eth.block_number)
         if head <= self.last_block:
             self.lag_blocks = 0
+            self.stale_skip_blocks = 0
             return []
 
         start = self.last_block + 1
         behind = head - self.last_block
+        self.stale_skip_blocks = 0
+        stale_limit = max(500, self.settings.max_catchup_blocks * 5)
+        if behind > stale_limit:
+            skip_to = max(self.last_block, head - self.settings.max_catchup_blocks)
+            skipped = skip_to - self.last_block
+            log.warning(
+                "Lag %s is stale (likely a bad RPC head). "
+                "Jumping last_block %s -> %s (skipped %s old blocks)",
+                behind,
+                self.last_block,
+                skip_to,
+                skipped,
+            )
+            self.last_block = skip_to
+            self.stale_skip_blocks = skipped
+            start = self.last_block + 1
+            behind = head - self.last_block
+
         self.lag_blocks = behind
         end = min(head, self.last_block + self.settings.max_catchup_blocks)
         if behind > self.settings.max_catchup_blocks:
